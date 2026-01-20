@@ -9,6 +9,8 @@ assets/stego/cocostuff27_vit_base_5.ckpt
 .vscode/**
 notebooks/**
 *.code-workspace
+**.bag
+
 
 # DrawIO
 **.dtmp
