@@ -46,7 +46,7 @@ load_save_checkpoint_rate: 1.0      # Rate at which checkpoints are saved / load
 
 # Runtime options
 device: "cuda"
-mode: "online"                      # Options: "online", "debug", "extract_labels"; Sets operation mode of both nodes
+mode: "debug"                      # Options: "online", "debug", "extract_labels"; Sets operation mode of both nodes
 colormap: "RdYlBu"
 
 print_image_callback_time: false

@@ -25,6 +25,7 @@ class SupervisionGenerator:
         untraversable_thr,
         time_horizon,
         graph_max_length,
+        firction_predict,
     ):
         """Generates traversability signals/labels from different sources
 
@@ -60,6 +61,9 @@ class SupervisionGenerator:
         self._sigmoid_slope = sigmoid_slope
         self._sigmoid_cutoff = sigmoid_cutoff
 
+        # firction
+        self._firction_predict = firction_predict
+
         # Save param to classify untraversable cases
         self._untraversable_thr = untraversable_thr
 
@@ -88,20 +92,27 @@ class SupervisionGenerator:
         self,
         current_velocity: torch.tensor,
         desired_velocity: torch.tensor,
+        friction_override: float, 
         max_velocity: float = 1.0,
         velocities: list = ["vx", "vy", "vz", "wx", "wy", "wz"],
     ):
-        """Generates an traversability signal using velocity tracking error
+        """Generates an traversability signal using friction prediction
 
         Args:
-            current_velocity (torch.tensor): Current estimated velocity
-            desired_velocity (torch.tensor): Desired velocity (command)
-            max_velocity (float): Max velocity (magnitude) to scale the error
+            current_velocity (torch.tensor): Current estimated velocity (unused now)
+            desired_velocity (torch.tensor): Desired velocity (unused now)
+            friction_override (float): Current friction prediction value (0~3)
+            max_velocity (float): Unused placeholder
 
         Returns:
             traversability (torch.tensor): Estimated traversability
             traversability_var (torch.tensor): Variance of the estimated traversability
         """
+
+        if not isinstance(friction_override, torch.Tensor):
+            friction_tensor = torch.tensor(friction_override).to(self.device)
+        else:
+            friction_tensor = friction_override.to(self.device)
 
         S = self.get_velocity_selection_matrix(velocities).to(self.device)
 
@@ -115,10 +126,16 @@ class SupervisionGenerator:
 
         # Note: The way we use the sigmoid is a bit hacky
         # We use negative argument to revert sigmoid (smaller errors -> 1.0) and stretch the errors
-        self._traversability = torch.sigmoid(-(self._sigmoid_slope * (error - self._sigmoid_cutoff)))
+        # self._traversability = torch.sigmoid(-(self._sigmoid_slope * (error - self._sigmoid_cutoff)))
+
+        # use firction_predict value(0:smooth, 3:rough)
+        self._traversability = torch.sigmoid(self._sigmoid_slope * (friction_tensor - self._sigmoid_cutoff))
+
         self._traversability_var = torch.tensor([1.0]).to(
             self._traversability.device
         )  # This needs to be improved, the KF can help
+
+        
 
         # Apply threshold to detect hard obstacles
         self._is_untraversable = (self._traversability < self._untraversable_thr).item()

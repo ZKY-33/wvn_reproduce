@@ -91,6 +91,7 @@ class WvnLearning:
             anomaly_detection=self.anomaly_detection,
         )
 
+        self._firction_predict = 1.0          
         # Initialize traversability generator to process velocity commands
         self._supervision_generator = SupervisionGenerator(
             device=self._ros_params.device,
@@ -103,6 +104,7 @@ class WvnLearning:
             untraversable_thr=self._ros_params.untraversable_thr,  # 0.1
             time_horizon=0.05,
             graph_max_length=1,
+            firction_predict = self._firction_predict, # subscribe rostopic /firction_predict
         )
 
         # Setup Timer if needed
@@ -315,6 +317,10 @@ class WvnLearning:
                 self._params.model.linear_rnvp_cfg.input_size = feature_dim
             rospy.loginfo(f"[{self._node_name}] Done")
 
+            # firction rostopic subscribe
+            rospy.loginfo(f"[{self._node_name}] Subscribing to /firction_predict...")
+            self._friction_predict_sub = rospy.Subscriber("/firction_predict", Float32, self.friction_callback)
+
         # 3D outputs
         self._pub_debug_supervision_graph = rospy.Publisher(
             "/wild_visual_navigation_node/supervision_graph", Path, queue_size=10
@@ -498,13 +504,14 @@ class WvnLearning:
             current_twist_tensor = rc.twist_stamped_to_torch(state_msg.twist, device=self._ros_params.device)
             desired_twist_tensor = rc.twist_stamped_to_torch(desired_twist_msg, device=self._ros_params.device)
 
-            # Update traversability
+            # Update firction_predict & traversability
+            current_friction = self._firction_predict
             (
                 traversability,
                 traversability_var,
                 is_untraversable,
             ) = self._supervision_generator.update_velocity_tracking(
-                current_twist_tensor, desired_twist_tensor, velocities=["vx", "vy"]
+                current_twist_tensor, desired_twist_tensor, friction_override=current_friction, velocities=["vx", "vy"]
             )
 
             # Create supervision node for the graph
@@ -686,7 +693,53 @@ class WvnLearning:
                 "value": f"failed to execute {e}",
             }
             raise Exception("Error in image callback")
+        
 
+    @accumulate_time
+    def friction_callback(self, msg: Float32):
+        """Callback to process friction prediction info.
+
+        Args:
+            msg (std_msgs/Float32): Friction prediction value (0.0 to 3.0)
+        """
+        if not self._setup_ready:
+            return
+
+        self._system_events["friction_callback_received"] = {
+            "time": time_func(),
+            "value": "message received",
+        }
+
+        try:
+            friction_val = msg.data
+            # validity check
+            if friction_val < 0.0 or friction_val > 3.0:
+                rospy.logwarn_throttle(
+                    5.0, 
+                    f"[{self._node_name}] Received friction value {friction_val} out of bounds [0, 3]. Clamping."
+                )
+                friction_val = max(0.0, min(friction_val, 3.0))
+
+            # update
+            self._firction_predict = float(friction_val)
+
+            # echo
+            self._system_events["friction_callback_state"] = {
+                "time": time_func(),
+                "value": "executed successfully",
+            }
+            
+            # "debug" mode:
+            # rospy.loginfo_throttle(1.0, f"[{self._node_name}] Updated friction: {self._firction_predict:.3f}")
+
+        except Exception as e:
+            traceback.print_exc()
+            rospy.logerr(f"[{self._node_name}] error in friction callback: {e}")
+            self._system_events["friction_callback_state"] = {
+                "time": time_func(),
+                "value": f"failed to execute {e}",
+            }
+    
     @accumulate_time
     def visualize_supervision(self):
         """Publishes all the visualizations related to supervision info,
