@@ -91,7 +91,7 @@ class WvnLearning:
             anomaly_detection=self.anomaly_detection,
         )
 
-        self._firction_predict = 1.0          
+        self._firction_predict = 3.0         
         # Initialize traversability generator to process velocity commands
         self._supervision_generator = SupervisionGenerator(
             device=self._ros_params.device,
@@ -100,7 +100,7 @@ class WvnLearning:
             kf_outlier_rejection="huber",
             kf_outlier_rejection_delta=0.5,
             sigmoid_slope=20,
-            sigmoid_cutoff=0.25,  # 0.2
+            sigmoid_cutoff=2.5,   
             untraversable_thr=self._ros_params.untraversable_thr,  # 0.1
             time_horizon=0.05,
             graph_max_length=1,
@@ -713,12 +713,12 @@ class WvnLearning:
         try:
             friction_val = msg.data
             # validity check
-            if friction_val < 0.0 or friction_val > 3.0:
+            if friction_val < 1.0 or friction_val > 4.0:
                 rospy.logwarn_throttle(
                     5.0, 
                     f"[{self._node_name}] Received friction value {friction_val} out of bounds [0, 3]. Clamping."
                 )
-                friction_val = max(0.0, min(friction_val, 3.0))
+                friction_val = max(1.0, min(friction_val, 4.0))
 
             # update
             self._firction_predict = float(friction_val)
