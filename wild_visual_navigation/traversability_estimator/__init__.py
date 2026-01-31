@@ -13,3 +13,4 @@ from .graphs import (
 )
 from .nodes import BaseNode, SupervisionNode, MissionNode, TwistNode, run_base_state
 from .traversability_estimator import TraversabilityEstimator
+from .latent_estimator import LatentVariableEstimator

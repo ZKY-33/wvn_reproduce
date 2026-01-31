@@ -297,5 +297,149 @@ def run_supervision_generator():
     print("done")
 
 
+class LatentSupervisionGenerator:
+    def __init__(
+        self,
+        device: str,
+        latent_dim: int = 16,
+        init_var: float = 1.0,
+    ):
+        """Generates latent variable signals/labels from external sources (e.g., ROS subscription)
+
+        Args:
+            device (str): Device used to load the torch models (e.g., 'cuda:0', 'cpu')
+            latent_dim (int): Dimension of the latent variable (default 16)
+            init_var (float): Initial variance for the latent variable
+        """
+        self.device = device
+        self._latent_dim = latent_dim
+
+        # Initial states：0
+        self._state = torch.zeros(latent_dim).to(self.device)
+        self._var = torch.ones(latent_dim).to(self.device) * init_var
+
+    def update_latent_observation(
+        self,
+        latent_input: torch.tensor,
+        latent_var_input: torch.tensor = None,
+    ):
+        """Updates the latent variable state with new observation
+
+        Args:
+            latent_input (torch.tensor): New latent variable observation (e.g., from ROS), shape [latent_dim]
+            latent_var_input (torch.tensor): Variance of the observation. If None, uses default variance.
+
+        Returns:
+            latent_variable (torch.tensor): The processed latent variable
+            latent_variable_var (torch.tensor): Variance of the latent variable
+        """
+        # Ensure input is a tensor and move to correct device
+        if not isinstance(latent_input, torch.Tensor):
+            latent_input = torch.tensor(latent_input).to(self.device)
+        else:
+            latent_input = latent_input.to(self.device)
+
+        # Handle variance input
+        if latent_var_input is None:
+            latent_var_input = torch.ones_like(latent_input)
+        elif not isinstance(latent_var_input, torch.Tensor):
+            latent_var_input = torch.tensor(latent_var_input).to(self.device)
+        else:
+            latent_var_input = latent_var_input.to(self.device)
+
+        # Optional: Sanity check for dimension
+        if latent_input.shape[-1] != self._latent_dim:
+            print(f"Warning: Input latent dim {latent_input.shape[-1]} mismatches init dim {self._latent_dim}. Updating state shape.")
+            self._latent_dim = latent_input.shape[-1]
+            self._state = torch.zeros(self._latent_dim).to(self.device)
+            self._var = torch.ones(self._latent_dim).to(self.device)
+
+        # Update state: latest latent
+        with torch.no_grad():
+            self._state = latent_input
+            self._var = latent_var_input
+
+        return self._state, self._var
+
+    @property
+    def latent_variable(self):
+        return self._state
+
+    @property
+    def latent_variable_var(self):
+        return self._var
+
+
+def run_latent_supervision_generator():
+    """Test function for LatentSupervisionGenerator using synthetic data"""
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Setup
+    device = "cpu"
+    latent_dim = 16
+    sequence_length = 100   # for test
+
+    # Prepare generator
+    lsg = LatentSupervisionGenerator(
+        device=device,
+        latent_dim=latent_dim,
+        init_var=0.5
+    )
+
+    # Saved data list
+    saved_data = []
+
+    # Simulate a time sequence where latent variable changes (e.g., first 8 dims are sine waves)
+    time_steps = np.arange(sequence_length)
+    
+    print("Starting latent supervision generator simulation...")
+
+    for i in range(sequence_length):
+        t = time_steps[i]
+        
+        # Create synthetic latent input: [Dim 0-7: Sine waves with different freqs], [Dim 8-15: Random noise]
+        sine_part = np.sin(0.1 * t * np.arange(1, 9)) 
+        noise_part = np.random.normal(0, 0.1, latent_dim - 8)
+        synthetic_latent = np.concatenate((sine_part, noise_part))
+        
+        # Synthetic variance (decreasing over time to simulate increasing confidence)
+        synthetic_var = np.ones(latent_dim) * (1.0 / (i + 1))
+
+        # Convert to tensors (simulating ROS data arrival)
+        latent_tensor = torch.from_numpy(synthetic_latent).float()
+        var_tensor = torch.from_numpy(synthetic_var).float()
+
+        # Update generator
+        lat, lat_var = lsg.update_latent_observation(latent_tensor, var_tensor)
+
+        # Save for visualization
+        saved_data.append(lat.numpy())
+
+    # Visualization
+    df = np.array(saved_data) # Shape: [100, 16]
+
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    
+    # Plot first 8 dimensions (Signal)
+    axs[0].plot(time_steps, df[:, :8])
+    axs[0].set_title("Latent Variable Dimensions 0-7 (Simulated Signal)")
+    axs[0].set_ylabel("Value")
+    axs[0].grid(True, alpha=0.3)
+
+    # Plot remaining 8 dimensions (Noise)
+    axs[1].plot(time_steps, df[:, 8:])
+    axs[1].set_title("Latent Variable Dimensions 8-15 (Simulated Noise)")
+    axs[1].set_ylabel("Value")
+    axs[1].set_xlabel("Time Step")
+    axs[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+    print("Simulation done.")
+
+
 if __name__ == "__main__":
     run_supervision_generator()
+    run_latent_supervision_generator()

@@ -5,8 +5,9 @@
 #
 from wild_visual_navigation import WVN_ROOT_DIR
 from wild_visual_navigation.image_projector import ImageProjector
-from wild_visual_navigation.supervision_generator import SupervisionGenerator
+from wild_visual_navigation.supervision_generator import SupervisionGenerator, LatentSupervisionGenerator
 from wild_visual_navigation.traversability_estimator import TraversabilityEstimator
+from wild_visual_navigation.traversability_estimator import LatentVariableEstimator
 from wild_visual_navigation.traversability_estimator import MissionNode, SupervisionNode
 import wild_visual_navigation_ros.ros_converter as rc
 from wild_visual_navigation_ros.reload_rosparams import reload_rosparams
@@ -25,7 +26,7 @@ from std_srvs.srv import SetBool, Trigger, TriggerResponse
 from geometry_msgs.msg import PoseStamped, Point, TwistStamped
 from nav_msgs.msg import Path
 from sensor_msgs.msg import Image, CameraInfo
-from std_msgs.msg import ColorRGBA, Float32
+from std_msgs.msg import ColorRGBA, Float32, Float32MultiArray
 from visualization_msgs.msg import Marker
 import tf2_ros
 import rospy
@@ -107,6 +108,25 @@ class WvnLearning:
             firction_predict = self._firction_predict, # subscribe rostopic /firction_predict
         )
 
+        # Initialize latent variable generator 
+        self._latent_supervision_generator = LatentSupervisionGenerator(
+            device=self._ros_params.device,
+            latent_dim=16,  
+            init_var=1.0
+        )
+
+        self._latent_estimator = LatentVariableEstimator(
+            params=self._params,
+            device=self._ros_params.device,
+            max_distance=self._ros_params.traversability_radius,   
+            image_distance_thr=self._ros_params.image_graph_dist_thr,
+            supervision_distance_thr=self._ros_params.supervision_graph_dist_thr,
+            min_samples_for_training=self._ros_params.min_samples_for_training,
+            vis_node_index=self._ros_params.vis_node_index,
+            mode=self._ros_params.mode,
+            extraction_store_folder=self._ros_params.extraction_store_folder,
+        )
+
         # Setup Timer if needed
         self._timer = ClassTimer(
             objects=[
@@ -114,12 +134,16 @@ class WvnLearning:
                 self._traversability_estimator,
                 self._traversability_estimator._visualizer,
                 self._supervision_generator,
+                self._latent_estimator, 
+                self._latent_supervision_generator, 
             ],
             names=[
                 "WVN",
                 "TraversabilityEstimator",
                 "Visualizer",
                 "SupervisionGenerator",
+                "LatentEstimator",     
+                "LatentSupervisionGenerator",       
             ],
             enabled=(
                 self._ros_params.print_image_callback_time
@@ -154,8 +178,13 @@ class WvnLearning:
             self._learning_thread_stop_event.set()
             # self.logging_thread_stop_event.set()
 
+        # traversability model
         print(f"[{self._node_name}] Storing learned checkpoint...", end="")
         self._traversability_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint.pt")
+        print("done")
+        # latent variable model
+        print(f"[{self._node_name}] Storing latent variable learned checkpoint...", end="")
+        self._latent_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint_latent.pt")
         print("done")
 
         if self._ros_params.log_time:
@@ -318,10 +347,14 @@ class WvnLearning:
             rospy.loginfo(f"[{self._node_name}] Done")
 
             # firction rostopic subscribe
-            rospy.loginfo(f"[{self._node_name}] Subscribing to /firction_predict...")
-            self._friction_predict_sub = rospy.Subscriber("/firction_predict", Float32, self.friction_callback)
+            rospy.loginfo(f"[{self._node_name}] Subscribing to {self._ros_params.friction_predict_topic}...")
+            self._friction_predict_sub = rospy.Subscriber(self._ros_params.friction_predict_topic, Float32, self.friction_callback)
 
-        # 3D outputs
+            # latent variable
+            rospy.loginfo(f"[{self._node_name}] Subscribing to {self._ros_params.latent_variable_topic}...")
+            self._latent_variable_sub = rospy.Subscriber(self._ros_params.latent_variable_topic, Float32MultiArray, self.latent_variable_callback)
+
+        # outputs
         self._pub_debug_supervision_graph = rospy.Publisher(
             "/wild_visual_navigation_node/supervision_graph", Path, queue_size=10
         )
@@ -329,7 +362,7 @@ class WvnLearning:
         self._pub_graph_footprints = rospy.Publisher(
             "/wild_visual_navigation_node/graph_footprints", Marker, queue_size=10
         )
-        # 1D outputs
+        # outputs: 1D traversability, 16D latent variable
         self._pub_instant_traversability = rospy.Publisher(
             "/wild_visual_navigation_node/instant_traversability",
             Float32,
@@ -338,6 +371,8 @@ class WvnLearning:
         self._pub_system_state = rospy.Publisher(
             "/wild_visual_navigation_node/system_state", SystemState, queue_size=10
         )
+        self._pub_instant_latent_variable = rospy.Publisher("/wild_visual_navigation_node/instant_latent_variable",Float32MultiArray,queue_size=10,)
+
 
         # Services
         # Like, reset graph or the like
@@ -700,7 +735,7 @@ class WvnLearning:
         """Callback to process friction prediction info.
 
         Args:
-            msg (std_msgs/Float32): Friction prediction value (0.0 to 3.0)
+            msg (std_msgs/Float32): Friction prediction value (1.0 to 4.0)
         """
         if not self._setup_ready:
             return
@@ -716,7 +751,7 @@ class WvnLearning:
             if friction_val < 1.0 or friction_val > 4.0:
                 rospy.logwarn_throttle(
                     5.0, 
-                    f"[{self._node_name}] Received friction value {friction_val} out of bounds [0, 3]. Clamping."
+                    f"[{self._node_name}] Received friction value {friction_val} out of bounds. Clamping."
                 )
                 friction_val = max(1.0, min(friction_val, 4.0))
 

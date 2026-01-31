@@ -4,4 +4,4 @@
 # See LICENSE file in the project root for details.
 #
 from .twist_dataset import TwistDataset, TwistDataModule
-from .supervision_generator import SupervisionGenerator, run_supervision_generator
+from .supervision_generator import SupervisionGenerator, run_supervision_generator, LatentSupervisionGenerator, run_latent_supervision_generator

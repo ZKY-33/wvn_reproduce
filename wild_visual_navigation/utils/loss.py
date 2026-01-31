@@ -162,3 +162,83 @@ class TraversabilityLoss(nn.Module):
     def update_node_confidence(self, node):
         reco_loss = F.mse_loss(node.prediction[:, 1:], node.features, reduction="none").mean(dim=1)
         node.confidence = self._confidence_generator.inference_without_update(reco_loss)
+
+
+class LatentVariableLoss(nn.Module):
+    def __init__(
+        self,
+        w_latent: float,
+        model: nn.Module,
+        method: str,
+        confidence_std_factor: float,
+        log_enabled: bool,
+        log_folder: str,
+    ):
+        super(LatentVariableLoss, self).__init__()
+        self._w_latent = w_latent
+        self._model = model
+        
+        # confidence initial
+        self._confidence_generator = ConfidenceGenerator(
+            std_factor=confidence_std_factor, method=method, log_enabled=log_enabled, log_folder=log_folder
+        )
+
+    def reset(self):
+        if hasattr(self._confidence_generator, 'reset'):
+            self._confidence_generator.reset()
+
+    def forward(
+        self,
+        graph: Data,
+        res: torch.Tensor, #  16-D latent variable
+        update_generator: bool = True,
+        step: int = 0,
+        log_step: bool = False,
+    ):
+        loss_aux = {}
+
+        # supervisiom: ROS subscribe graph.y_latent
+        if not hasattr(graph, 'y_latent'):
+            raise ValueError("LatentVariableLoss requires 'y_latent' attribute in the graph object.")
+        
+        target = graph.y_latent
+
+        # MSE Loss, reduction='none' output [Batch_Size, 16]
+        loss_latent_raw = F.mse_loss(res, target, reduction="none")
+        
+        loss_per_sample = loss_latent_raw.mean(dim=1)
+
+        # model update 
+        with torch.no_grad():
+            if update_generator:
+                confidence = self._confidence_generator.update(
+                    x=loss_per_sample,
+                    x_positive=loss_per_sample, 
+                    step=step,
+                    log_step=log_step,
+                )
+            else:
+                confidence = self._confidence_generator.inference_without_update(x=loss_per_sample)
+
+        loss_latent_mean = loss_per_sample.mean()
+        loss = self._w_latent * loss_latent_mean
+
+        loss_aux["loss_latent"] = loss_latent_mean
+        loss_aux["confidence"] = confidence
+
+        res_updated = res
+        return (
+            loss,
+            loss_aux,
+            res_updated,
+        )
+
+    def update_node_confidence(self, node):
+        # node update: prediction & y_latent(supervision) 
+        if hasattr(node, 'y_latent') and hasattr(node, 'prediction'):
+            pred = node.prediction
+            target = node.y_latent
+            
+            error = F.mse_loss(pred, target, reduction="none").mean(dim=1)
+            
+            node.confidence = self._confidence_generator.inference_without_update(error)

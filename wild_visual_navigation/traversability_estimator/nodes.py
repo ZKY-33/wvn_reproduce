@@ -462,6 +462,8 @@ class SupervisionNode(BaseNode):
         traversability: torch.tensor = torch.FloatTensor([0.0]),
         traversability_var: torch.tensor = torch.FloatTensor([1.0]),
         is_untraversable: bool = False,
+        latent_variable: torch.tensor = torch.zeros(16),  # init all 0
+        latent_variable_var: torch.tensor = torch.ones(16), # init var = 1
     ):
         assert isinstance(pose_base_in_world, torch.Tensor)
         assert isinstance(pose_footprint_in_base, torch.Tensor)
@@ -482,6 +484,8 @@ class SupervisionNode(BaseNode):
         self._traversability = traversability
         self._traversability_var = traversability_var
         self._is_untraversable = is_untraversable
+        self._latent_variable = latent_variable
+        self._latent_variable_var = latent_variable_var
 
     def change_device(self, device):
         """Changes the device of all the class members
@@ -495,6 +499,9 @@ class SupervisionNode(BaseNode):
         self._twist_in_base = self._twist_in_base.to(device)
         self._desired_twist_in_base = self._desired_twist_in_base.to(device)
         self._supervision_state = self._supervision_state.to(device)
+        self._latent_variable = self._latent_variable.to(device)
+        self._latent_variable_var = self._latent_variable_var.to(device)
+
 
     def get_bounding_box_points(self):
         return make_box(
@@ -577,6 +584,30 @@ class SupervisionNode(BaseNode):
             self._traversability = traversability
             self._traversability_var = traversability_var
 
+    # def update_latent_variable(self, latent_variable: torch.tensor, latent_variable_var: torch.tensor):
+    #     """
+    #     更新隐变量，通常采用加权平均策略融合历史信息，而非悲观规则
+    #     """
+    #     if not isinstance(latent_variable, torch.Tensor):
+    #         latent_variable = torch.tensor(latent_variable)
+    #     if not isinstance(latent_variable_var, torch.Tensor):
+    #         latent_variable_var = torch.tensor(latent_variable_var)
+
+    #     if self._latent_variable.shape != latent_variable.shape:
+    #         self._latent_variable = latent_variable
+    #         self._latent_variable_var = latent_variable_var
+    #     else:
+    #         # 加权融合平均 新权重与方差成反比 (方差越小，可信度越高)
+    #         w_new = 1.0 / (latent_variable_var + 1e-6)
+    #         w_old = 1.0 / (self._latent_variable_var + 1e-6)
+            
+    #         w_total = w_new + w_old
+            
+    #         self._latent_variable = (w_new * latent_variable + w_old * self._latent_variable) / w_total
+            
+    #         self._latent_variable_var = 1.0 / w_total
+
+
     @property
     def traversability(self):
         return self._traversability
@@ -584,6 +615,14 @@ class SupervisionNode(BaseNode):
     @property
     def traversability_var(self):
         return self._traversability_var
+    
+    @property
+    def latent_variable(self):
+        return self._latent_variable
+
+    @property
+    def latent_variable_var(self):
+        return self._latent_variable_var
 
     @property
     def twist_in_base(self):
@@ -612,6 +651,14 @@ class SupervisionNode(BaseNode):
     @traversability_var.setter
     def traversability_var(self, variance):
         self._traversability_var = variance
+
+    @latent_variable.setter
+    def latent_variable(self, value):
+        self._latent_variable = value
+
+    @latent_variable_var.setter
+    def latent_variable_var(self, value):
+        self._latent_variable_var = value
 
     def is_valid(self):
         return isinstance(self._supervision_state, torch.Tensor)
