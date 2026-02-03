@@ -37,15 +37,6 @@ class RosLearningNodeParams:
 
     # Supervision Generator
     untraversable_thr: float
-    
-    # firction
-    friction_predict_topic: str = "/firction_predict" 
-    # latent variable
-    latent_variable_topic: str = "/him_est"
-    latent_total_dim: int = 19      
-    vel_dim: int = 3          
-    latent_var_dim: int = 16   
-
 
     mission_name: str
     mission_timestamp: bool
@@ -70,6 +61,14 @@ class RosLearningNodeParams:
 
     extraction_store_folder: str
 
+    # # friction
+    # friction_predict_topic: str = "/firction_predict" 
+    # # latent variable
+    # latent_variable_topic: str = "/him_est"
+    # latent_total_dim: int = 19      
+    # vel_dim: int = 3          
+    # latent_var_dim: int = 16   
+    
 
 @dataclass
 class RosFeatureExtractorNodeParams:

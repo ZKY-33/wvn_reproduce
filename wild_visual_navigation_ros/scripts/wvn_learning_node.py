@@ -92,7 +92,7 @@ class WvnLearning:
             anomaly_detection=self.anomaly_detection,
         )
 
-        self._firction_predict = 3.0         
+        self._friction_predict = 3.0         
         # Initialize traversability generator to process velocity commands
         self._supervision_generator = SupervisionGenerator(
             device=self._ros_params.device,
@@ -105,7 +105,7 @@ class WvnLearning:
             untraversable_thr=self._ros_params.untraversable_thr,  # 0.1
             time_horizon=0.05,
             graph_max_length=1,
-            firction_predict = self._firction_predict, # subscribe rostopic /firction_predict
+            friction_predict = self._friction_predict, # subscribe rostopic /friction_predict
         )
 
         # Initialize latent variable generator 
@@ -125,6 +125,7 @@ class WvnLearning:
             vis_node_index=self._ros_params.vis_node_index,
             mode=self._ros_params.mode,
             extraction_store_folder=self._ros_params.extraction_store_folder,
+            anomaly_detection = False, 
         )
 
         # Setup Timer if needed
@@ -183,9 +184,9 @@ class WvnLearning:
         self._traversability_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint.pt")
         print("done")
         # latent variable model
-        print(f"[{self._node_name}] Storing latent variable learned checkpoint...", end="")
-        self._latent_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint_latent.pt")
-        print("done")
+        # print(f"[{self._node_name}] Storing latent variable learned checkpoint...", end="")
+        # self._latent_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint_latent.pt")
+        # print("done")
 
         if self._ros_params.log_time:
             print(f"[{self._node_name}] Storing timer data...", end="")
@@ -346,13 +347,13 @@ class WvnLearning:
                 self._params.model.linear_rnvp_cfg.input_size = feature_dim
             rospy.loginfo(f"[{self._node_name}] Done")
 
-            # firction rostopic subscribe
-            rospy.loginfo(f"[{self._node_name}] Subscribing to {self._ros_params.friction_predict_topic}...")
-            self._friction_predict_sub = rospy.Subscriber(self._ros_params.friction_predict_topic, Float32, self.friction_callback)
+            # friction rostopic subscribe
+            rospy.loginfo(f"[{self._node_name}] Subscribing to /firction_predict...")
+            self._friction_predict_sub = rospy.Subscriber("/firction_predict", Float32, self.friction_callback)
 
             # latent variable
-            rospy.loginfo(f"[{self._node_name}] Subscribing to {self._ros_params.latent_variable_topic}...")
-            self._latent_variable_sub = rospy.Subscriber(self._ros_params.latent_variable_topic, Float32MultiArray, self.latent_variable_callback)
+            # rospy.loginfo(f"[{self._node_name}] Subscribing to /him_est...")
+            # self._latent_variable_sub = rospy.Subscriber("/him_est", Float32MultiArray, self.latent_variable_callback)
 
         # outputs
         self._pub_debug_supervision_graph = rospy.Publisher(
@@ -539,8 +540,8 @@ class WvnLearning:
             current_twist_tensor = rc.twist_stamped_to_torch(state_msg.twist, device=self._ros_params.device)
             desired_twist_tensor = rc.twist_stamped_to_torch(desired_twist_msg, device=self._ros_params.device)
 
-            # Update firction_predict & traversability
-            current_friction = self._firction_predict
+            # Update friction_predict & traversability
+            current_friction = self._friction_predict
             (
                 traversability,
                 traversability_var,
@@ -756,7 +757,7 @@ class WvnLearning:
                 friction_val = max(1.0, min(friction_val, 4.0))
 
             # update
-            self._firction_predict = float(friction_val)
+            self._friction_predict = float(friction_val)
 
             # echo
             self._system_events["friction_callback_state"] = {
@@ -765,7 +766,7 @@ class WvnLearning:
             }
             
             # "debug" mode:
-            # rospy.loginfo_throttle(1.0, f"[{self._node_name}] Updated friction: {self._firction_predict:.3f}")
+            # rospy.loginfo_throttle(1.0, f"[{self._node_name}] Updated friction: {self._friction_predict:.3f}")
 
         except Exception as e:
             traceback.print_exc()

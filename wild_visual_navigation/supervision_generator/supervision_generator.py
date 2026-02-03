@@ -25,7 +25,7 @@ class SupervisionGenerator:
         untraversable_thr,
         time_horizon,
         graph_max_length,
-        firction_predict,
+        friction_predict,
     ):
         """Generates traversability signals/labels from different sources
 
@@ -61,8 +61,8 @@ class SupervisionGenerator:
         self._sigmoid_slope = sigmoid_slope
         self._sigmoid_cutoff = sigmoid_cutoff
 
-        # firction
-        self._firction_predict = firction_predict
+        # friction
+        self._friction_predict = friction_predict
 
         # Save param to classify untraversable cases
         self._untraversable_thr = untraversable_thr
@@ -128,7 +128,7 @@ class SupervisionGenerator:
         # We use negative argument to revert sigmoid (smaller errors -> 1.0) and stretch the errors
         # self._traversability = torch.sigmoid(-(self._sigmoid_slope * (error - self._sigmoid_cutoff)))
 
-        # use firction_predict value
+        # use friction_predict value
         self._traversability = torch.sigmoid(self._sigmoid_slope * (friction_tensor - self._sigmoid_cutoff))
 
         self._traversability_var = torch.tensor([1.0]).to(
