@@ -154,17 +154,19 @@ class WvnFeatureExtractor:
             self._camera_handler[cam]["K"] = K
             self._camera_handler[cam]["H"] = H
             self._camera_handler[cam]["W"] = W
-
+            
+            # Image projector
             image_projector = ImageProjector(
                 K=self._camera_handler[cam]["K"],
                 h=self._camera_handler[cam]["H"],
                 w=self._camera_handler[cam]["W"],
-                new_h=self._ros_params.network_input_image_height,
-                new_w=self._ros_params.network_input_image_width,
+                new_h=self._ros_params.network_input_image_height,      # 299
+                new_w=self._ros_params.network_input_image_width,       # 224   
             )
+            # cameraInfo update
             msg = self._camera_handler[cam]["camera_info"]
-            msg.width = self._ros_params.network_input_image_width
-            msg.height = self._ros_params.network_input_image_height
+            msg.width = self._ros_params.network_input_image_width     
+            msg.height = self._ros_params.network_input_image_height   
             msg.K = image_projector.scaled_camera_matrix[0, :3, :3].cpu().numpy().flatten().tolist()
             msg.P = image_projector.scaled_camera_matrix[0, :3, :4].cpu().numpy().flatten().tolist()
 
@@ -172,7 +174,24 @@ class WvnFeatureExtractor:
                 self._camera_handler[cam]["camera_info_msg_out"] = msg
                 self._camera_handler[cam]["image_projector"] = image_projector
 
-            # Set subscribers
+
+            input_depth_h = self._ros_params.network_input_image_height # 299 
+            input_depth_w = self._ros_params.network_input_image_width  # 224
+            
+            # int 2 Tensor
+            depth_h_tensor = torch.tensor(input_depth_h).to(self._ros_params.device)
+            depth_w_tensor = torch.tensor(input_depth_w).to(self._ros_params.device)
+
+            #  depth_projector
+            self._camera_handler[cam]["depth_projector"] = ImageProjector(
+                K=K, # 使用原始内参
+                h=depth_h_tensor,
+                w=depth_w_tensor,
+                new_h=self._ros_params.network_input_image_height, # 224 
+                new_w=self._ros_params.network_input_image_width,  # 224 
+            )
+
+            # Set subscribers RGB & Depth
             base_topic = self._ros_params.camera_topics[cam]["image_topic"].replace("/compressed", "")
             is_compressed = self._ros_params.camera_topics[cam]["image_topic"] != base_topic
             if is_compressed:
@@ -193,6 +212,16 @@ class WvnFeatureExtractor:
                     queue_size=1,
                 )
             self._camera_handler[cam]["image_sub"] = image_sub
+
+            if "depth_topic" in self._ros_params.camera_topics[cam]:
+                depth_sub = rospy.Subscriber(
+                    self._ros_params.camera_topics[cam]["depth_topic"],
+                    Image,
+                    self.depth_callback,
+                    callback_args=cam,
+                    queue_size=1,
+                )
+                self._camera_handler[cam]["depth_sub"] = depth_sub
 
             # Set publishers
             trav_pub = rospy.Publisher(
@@ -218,6 +247,14 @@ class WvnFeatureExtractor:
                     queue_size=1,
                 )
                 self._camera_handler[cam]["input_pub"] = input_pub
+            
+            depth_pub = rospy.Publisher(
+                f"/wild_visual_navigation_node/{cam}/depth_input",
+                Image,
+                queue_size=1,
+            )
+            self._camera_handler[cam]["depth_pub"] = depth_pub
+
 
             if self._ros_params.camera_topics[cam]["publish_confidence"]:
                 conf_pub = rospy.Publisher(
@@ -292,6 +329,7 @@ class WvnFeatureExtractor:
                 rospy.loginfo(f"[{self._node_name}] Image callback: {cam} -> Process")
 
         self._last_image_ts[cam] = ts
+        self._camera_handler[cam]["last_sync_stamp"] = image_msg.header.stamp
 
         # If all the checks are passed, process the image
         try:
@@ -403,6 +441,47 @@ class WvnFeatureExtractor:
 
         # Step scheduler
         self._camera_scheduler.step()
+
+
+    @torch.no_grad()
+    def depth_callback(self, depth_msg: Image, cam: str):
+        if "last_sync_stamp" not in self._camera_handler[cam]:
+            return
+
+        try:
+            # 1. 转 Tensor (假设输入是 16UC1, rc.ros_image_to_torch 会自动转为 float32 [0, 1] 或者 [0, 65535] ?)
+            # 通常 rc.ros_image_to_torch 会归一化到 [0, 1]。如果是这样，输出时需要反归一化。
+            # 如果 rc.ros_image_to_torch 保留了原始数值，则需要除以 65535.0 归一化后再喂给 projector，再反算回来。
+            
+            # 假设 rc.ros_image_to_torch 输出是 [0, 65535.0] 的 float32 tensor
+            torch_depth = rc.ros_image_to_torch(depth_msg, device=self._ros_params.device)
+            
+            # 归一化到 [0, 1] 以便进行图像处理 (Resize/Crop 在 [0,1] 下效果最好)
+            torch_depth_norm = torch_depth / 65535.0
+            
+            # 2. 裁剪 (299x224 -> 224x224)
+            cropped_depth = self._camera_handler[cam]["depth_projector"].resize_image(torch_depth_norm)
+            
+            # 3. 反归一化并转回 uint16
+            # 从 [0, 1] -> [0, 65535]
+            depth_np = (cropped_depth * 65535.0).cpu().numpy().astype(np.uint16)
+            
+            # 4. 转 ROS Msg
+            msg = rc.numpy_to_ros_image(depth_np, "16UC1")
+            
+            # 5. 同步时间戳
+            msg.header.stamp = self._camera_handler[cam]["last_sync_stamp"]
+            msg.header.frame_id = depth_msg.header.frame_id
+            
+            # 6. 发布
+            self._camera_handler[cam]["depth_pub"].publish(msg)
+
+        except Exception as e:
+            rospy.logerr(f"[{self._node_name}] Error in depth_callback: {e}")
+            import traceback
+            traceback.print_exc()
+
+
 
     def load_model(self, stamp):
         """Method to load the new model weights to perform inference on the incoming images
