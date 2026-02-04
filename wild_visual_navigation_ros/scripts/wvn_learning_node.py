@@ -92,6 +92,9 @@ class WvnLearning:
             anomaly_detection=self.anomaly_detection,
         )
 
+        # control flag of model training or not
+        self._traversability_estimator.pause_learning = True
+
         self._friction_predict = 3.0         
         # Initialize traversability generator to process velocity commands
         self._supervision_generator = SupervisionGenerator(
@@ -179,10 +182,15 @@ class WvnLearning:
             self._learning_thread_stop_event.set()
             # self.logging_thread_stop_event.set()
 
+        # model save
         # traversability model
-        print(f"[{self._node_name}] Storing learned checkpoint...", end="")
-        self._traversability_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint.pt")
-        print("done")
+        if not self._traversability_estimator.pause_learning:
+            print(f"[{self._node_name}] Storing learned checkpoint...", end="")
+            self._traversability_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint.pt")
+            print("done")
+        else:
+            rospy.loginfo(f"[{self._node_name}] No training, skipping checkpoint saving.")
+
         # latent variable model
         # print(f"[{self._node_name}] Storing latent variable learned checkpoint...", end="")
         # self._latent_estimator.save_checkpoint(self._params.general.model_path, "last_checkpoint_latent.pt")
@@ -400,46 +408,48 @@ class WvnLearning:
             if self._learning_thread_stop_event.is_set():
                 rospy.logwarn("Stopped learning thread")
                 break
+            
+            # training control
+            if not self._traversability_estimator.pause_learning:
+                # Optimize model
+                with ClassContextTimer(parent_obj=self, block_name="training_step_time"):
+                    res = self._traversability_estimator.train()
 
-            # Optimize model
-            with ClassContextTimer(parent_obj=self, block_name="training_step_time"):
-                res = self._traversability_estimator.train()
+                if self._step != self._traversability_estimator.step:
+                    self._step_time = time_func()
+                    self._step = self._traversability_estimator.step
 
-            if self._step != self._traversability_estimator.step:
-                self._step_time = time_func()
-                self._step = self._traversability_estimator.step
+                # Publish loss
+                system_state = SystemState()
+                for k in res.keys():
+                    if hasattr(system_state, k):
+                        setattr(system_state, k, res[k])
 
-            # Publish loss
-            system_state = SystemState()
-            for k in res.keys():
-                if hasattr(system_state, k):
-                    setattr(system_state, k, res[k])
+                system_state.pause_learning = self._traversability_estimator.pause_learning
+                system_state.mode = self._ros_params.mode.value
+                system_state.step = self._step
+                self._pub_system_state.publish(system_state)
 
-            system_state.pause_learning = self._traversability_estimator.pause_learning
-            system_state.mode = self._ros_params.mode.value
-            system_state.step = self._step
-            self._pub_system_state.publish(system_state)
+                # Get current weights
+                new_model_state_dict = self._traversability_estimator._model.state_dict()
 
-            # Get current weights
-            new_model_state_dict = self._traversability_estimator._model.state_dict()
+                # Check the rate
+                ts = time_func()
+                if abs(ts - self._last_checkpoint_ts) > 1.0 / self._ros_params.load_save_checkpoint_rate:
+                    cg = self._traversability_estimator._traversability_loss._confidence_generator
+                    new_model_state_dict["confidence_generator"] = cg.get_dict()
 
-            # Check the rate
-            ts = time_func()
-            if abs(ts - self._last_checkpoint_ts) > 1.0 / self._ros_params.load_save_checkpoint_rate:
-                cg = self._traversability_estimator._traversability_loss._confidence_generator
-                new_model_state_dict["confidence_generator"] = cg.get_dict()
-
-                fn = os.path.join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
-                if os.path.exists(fn):
-                    os.remove(fn)
-                torch.save(new_model_state_dict, fn)
-                self._last_checkpoint_ts = ts
-                print(
-                    "Update model. Valid Nodes: ",
-                    self._traversability_estimator._mission_graph.get_num_valid_nodes(),
-                    " steps: ",
-                    self._traversability_estimator._step,
-                )
+                    fn = os.path.join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
+                    if os.path.exists(fn):
+                        os.remove(fn)
+                    torch.save(new_model_state_dict, fn)
+                    self._last_checkpoint_ts = ts
+                    print(
+                        "Update model. Valid Nodes: ",
+                        self._traversability_estimator._mission_graph.get_num_valid_nodes(),
+                        " steps: ",
+                        self._traversability_estimator._step,
+                    )
 
             rate.sleep()
 
@@ -1039,6 +1049,7 @@ class WvnLearning:
 
 
 if __name__ == "__main__":
+    # WVN_ROOT_DIR:wild_visual_navigation目录
     fn = os.path.join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
     if os.path.exists(fn):
         os.remove(fn)

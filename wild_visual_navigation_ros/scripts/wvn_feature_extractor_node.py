@@ -418,37 +418,63 @@ class WvnFeatureExtractor:
 
         # self._load_model_counter += 1
         # if self._load_model_counter % 10 == 0:
-        p = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
+        # p = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
         # p = join(WVN_ROOT_DIR,"assets/checkpoints/mountain_bike_trail_fpr_0.25.pt")
+        
+        p_tmp = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
+        # 如果临时文件不存在，尝试加载静态的预训练模型（用于纯推理模式）
+        p_static = join(WVN_ROOT_DIR, "assets/checkpoints/indoor_mpi.pt") 
+        
+        target_path = None
+        if os.path.exists(p_tmp):
+            target_path = p_tmp
+        elif os.path.exists(p_static):
+            # 仅在第一次发现静态文件时打印，避免刷屏
+            if not hasattr(self, '_static_model_loaded'):
+                rospy.loginfo(f"[{self._node_name}] Inference mode: Loading static model from {p_static}")
+                self._static_model_loaded = True
+            target_path = p_static
+        else:
+            # 如果两个文件都不存在，且还没加载过初始DINO权重（或其他初始权重），则保持静默或仅在首次报错
+            if not hasattr(self, '_initial_model_loaded'):
+                # 使用初始化时的权重（通常是DINO）
+                pass 
+            return
 
-        if os.path.exists(p):
-            new_model_state_dict = torch.load(p)
+        try:
+            new_model_state_dict = torch.load(target_path)
             k = list(self._model.state_dict().keys())[-1]
 
-            # check if the key is in state dict - this may be not the case if switched between models
-            # assumption first key within state_dict is unique and sufficient to identify if a model has changed
+            # check if the key is in state dict
             if k in new_model_state_dict:
-                # check if the model has changed
-                if (self._model.state_dict()[k] != new_model_state_dict[k]).any():
+                current_state_k = self._model.state_dict()[k]
+                new_state_k = new_model_state_dict[k]
+                has_changed = False
+                if current_state_k.shape != new_state_k.shape:
+                    has_changed = True
+                else:
+                    if not torch.equal(current_state_k, new_state_k):
+                         has_changed = True
+
+                if has_changed:
                     if self._ros_params.verbose:
                         self._log_data[f"time_last_model"] = rospy.get_time()
                         self._log_data[f"nr_model_updates"] += 1
 
                     self._model.load_state_dict(new_model_state_dict, strict=False)
+                    
                     if "confidence_generator" in new_model_state_dict.keys():
                         cg = new_model_state_dict["confidence_generator"]
                         self._confidence_generator.var = cg["var"]
                         self._confidence_generator.mean = cg["mean"]
                         self._confidence_generator.std = cg["std"]
 
-                    if self._ros_params.verbose:
-                        m, s, v = cg["mean"].item(), cg["std"].item(), cg["var"].item()
-                        rospy.loginfo(f"[{self._node_name}] Loaded Confidence Generator {m}, std {s} var {v}")
-
-        else:
-            if self._ros_params.verbose:
-                rospy.logerr(f"[{self._node_name}] Model Loading Failed")
-
+                        if self._ros_params.verbose:
+                            m, s, v = cg["mean"].item(), cg["std"].item(), cg["var"].item()
+                            rospy.loginfo(f"[{self._node_name}] Loaded Confidence Generator {m}, std {s} var {v}")
+        except Exception as e:
+            rospy.logerr(f"[{self._node_name}] Error loading model from {target_path}: {e}")
+        
 
 if __name__ == "__main__":
     node_name = "wvn_feature_extractor_node"
