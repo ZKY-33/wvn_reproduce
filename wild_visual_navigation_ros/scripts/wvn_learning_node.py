@@ -118,6 +118,7 @@ class WvnLearning:
             init_var=1.0
         )
 
+        # latent variable generate
         self._latent_estimator = LatentVariableEstimator(
             params=self._params,
             device=self._ros_params.device,
@@ -332,6 +333,22 @@ class WvnLearning:
                     )
                     sync.registerCallback(self.imagefeat_callback, self._ros_params.camera_topics[cam])
 
+                # subcribe and publishresized depth from feature_extractor node
+                # depth_relay_sub = rospy.Subscriber(
+                #     f"/wild_visual_navigation_node/{cam}/depth_input",
+                #     Image,
+                #     self.depth_relay_callback,
+                #     callback_args=cam,
+                #     queue_size=5, 
+                # )
+                # self._camera_handler[cam]["depth_relay_sub"] = depth_relay_sub
+                # depth_relay_pub = rospy.Publisher(
+                #     f"/wild_visual_navigation_node/{cam}/depth_relay", 
+                #     Image,
+                #     queue_size=5,
+                # )
+                # self._camera_handler[cam]["depth_relay_pub"] = depth_relay_pub
+
             # Wait for features message to determine the input size of the model
             cam = list(self._ros_params.camera_topics.keys())[0]
 
@@ -363,7 +380,7 @@ class WvnLearning:
             # rospy.loginfo(f"[{self._node_name}] Subscribing to /him_est...")
             # self._latent_variable_sub = rospy.Subscriber("/him_est", Float32MultiArray, self.latent_variable_callback)
 
-        # outputs
+        # Set Publishers
         self._pub_debug_supervision_graph = rospy.Publisher(
             "/wild_visual_navigation_node/supervision_graph", Path, queue_size=10
         )
@@ -618,6 +635,8 @@ class WvnLearning:
             assert len(args) == 3
             imagefeat_msg, info_msg, camera_options = tuple(args)
 
+        cam_name = camera_options['name']
+
         self._system_events["image_callback_received"] = {
             "time": time_func(),
             "value": "message received",
@@ -632,6 +651,10 @@ class WvnLearning:
             if abs(ts - self._last_image_ts) < 1.0 / self._ros_params.image_callback_rate:
                 return
             self._last_image_ts = ts
+
+            # 将时间戳存入 handler，供 depth_relay_callback 使用, 使用 info_msg.header.stamp 作为基准，因为它与 imagefeat_msg 同步
+            self._camera_handler[cam_name]["last_sync_stamp"] = info_msg.header.stamp
+            
 
             # Query transforms from TF
             success, pose_base_in_world = rc.ros_tf_to_torch(
@@ -740,6 +763,22 @@ class WvnLearning:
             }
             raise Exception("Error in image callback")
         
+    # resized_depth 
+    def depth_relay_callback(self, depth_msg: Image, cam: str):
+        # 检查是否有可用的同步时间戳
+        if self._camera_handler[cam]["last_sync_stamp"] is None:
+            return
+
+        try:
+            # 1. 更新时间戳, 使用 imagefeat_callback 中记录的时间戳, 保证 depth_msg 的时间戳 与 traversability 等计算结果的时间戳一致
+            depth_msg.header.stamp = self._camera_handler[cam]["last_sync_stamp"]
+
+            # 2. 转发消息
+            self._camera_handler[cam]["depth_relay_pub"].publish(depth_msg)
+
+        except Exception as e:
+            rospy.logerr(f"[{self._node_name}] Error in depth_relay_callback: {e}")
+
 
     @accumulate_time
     def friction_callback(self, msg: Float32):

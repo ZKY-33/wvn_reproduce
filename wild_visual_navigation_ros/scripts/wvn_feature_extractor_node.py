@@ -160,7 +160,7 @@ class WvnFeatureExtractor:
                 K=self._camera_handler[cam]["K"],
                 h=self._camera_handler[cam]["H"],
                 w=self._camera_handler[cam]["W"],
-                new_h=self._ros_params.network_input_image_height,      # 299
+                new_h=self._ros_params.network_input_image_height,      # 224
                 new_w=self._ros_params.network_input_image_width,       # 224   
             )
             # cameraInfo update
@@ -174,11 +174,10 @@ class WvnFeatureExtractor:
                 self._camera_handler[cam]["camera_info_msg_out"] = msg
                 self._camera_handler[cam]["image_projector"] = image_projector
 
-
-            input_depth_h = self._ros_params.network_input_image_height # 299 
-            input_depth_w = self._ros_params.network_input_image_width  # 224
-            
-            # int 2 Tensor
+            # depth input 
+            input_depth_h = 229
+            input_depth_w = 224
+            # int to Tensor
             depth_h_tensor = torch.tensor(input_depth_h).to(self._ros_params.device)
             depth_w_tensor = torch.tensor(input_depth_w).to(self._ros_params.device)
 
@@ -187,7 +186,7 @@ class WvnFeatureExtractor:
                 K=K, # 使用原始内参
                 h=depth_h_tensor,
                 w=depth_w_tensor,
-                new_h=self._ros_params.network_input_image_height, # 224 
+                new_h=self._ros_params.network_input_image_height, # 224 与RGB保持一致
                 new_w=self._ros_params.network_input_image_width,  # 224 
             )
 
@@ -449,27 +448,24 @@ class WvnFeatureExtractor:
             return
 
         try:
-            # 1. 转 Tensor (假设输入是 16UC1, rc.ros_image_to_torch 会自动转为 float32 [0, 1] 或者 [0, 65535] ?)
-            # 通常 rc.ros_image_to_torch 会归一化到 [0, 1]。如果是这样，输出时需要反归一化。
-            # 如果 rc.ros_image_to_torch 保留了原始数值，则需要除以 65535.0 归一化后再喂给 projector，再反算回来。
-            
-            # 假设 rc.ros_image_to_torch 输出是 [0, 65535.0] 的 float32 tensor
+            # 1. 转 Tensor，归一化到 [0, 1] 进行 resize 操作
+            # 假设 rc.ros_image_to_torch 返回的是 float32，数值范围可能是 [0, 65535] 或者 [0, 1]
             torch_depth = rc.ros_image_to_torch(depth_msg, device=self._ros_params.device)
             
-            # 归一化到 [0, 1] 以便进行图像处理 (Resize/Crop 在 [0,1] 下效果最好)
-            torch_depth_norm = torch_depth / 65535.0
+            # 归一化 (uint16)
+            if torch_depth.max() > 1.0:
+                torch_depth = torch_depth / 65535.0
             
-            # 2. 裁剪 (299x224 -> 224x224)
-            cropped_depth = self._camera_handler[cam]["depth_projector"].resize_image(torch_depth_norm)
+            # 2. Resize (299x224 -> 224x224)
+            cropped_depth = self._camera_handler[cam]["depth_projector"].resize_image(torch_depth)
             
-            # 3. 反归一化并转回 uint16
-            # 从 [0, 1] -> [0, 65535]
+            # 3. 反归一化 (恢复深度值)
             depth_np = (cropped_depth * 65535.0).cpu().numpy().astype(np.uint16)
             
             # 4. 转 ROS Msg
-            msg = rc.numpy_to_ros_image(depth_np, "16UC1")
+            msg = self.bridge.cv2_to_imgmsg(depth_np, "16UC1")
             
-            # 5. 同步时间戳
+            # 5. 时间戳同步，用 RGB 保存的时间戳
             msg.header.stamp = self._camera_handler[cam]["last_sync_stamp"]
             msg.header.frame_id = depth_msg.header.frame_id
             
@@ -514,9 +510,8 @@ class WvnFeatureExtractor:
                 self._static_model_loaded = True
             target_path = p_static
         else:
-            # 如果两个文件都不存在，且还没加载过初始DINO权重（或其他初始权重），则保持静默或仅在首次报错
+            # 如果两个文件都不存在，且还没加载过初始DINO权重（或其他初始权重），则使用初始化时的权重，保持静默或仅在首次报错
             if not hasattr(self, '_initial_model_loaded'):
-                # 使用初始化时的权重（通常是DINO）
                 pass 
             return
 
