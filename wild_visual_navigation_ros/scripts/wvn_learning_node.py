@@ -93,7 +93,7 @@ class WvnLearning:
         )
 
         # control flag of model training or not
-        self._traversability_estimator.pause_learning = True
+        self._traversability_estimator.pause_learning = False
 
         self._friction_predict = 3.0         
         # Initialize traversability generator to process velocity commands

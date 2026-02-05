@@ -32,6 +32,7 @@ from threading import Thread, Event
 from prettytable import PrettyTable
 from termcolor import colored
 import os
+from cv_bridge import CvBridge
 
 
 class WvnFeatureExtractor:
@@ -42,6 +43,8 @@ class WvnFeatureExtractor:
         # Initialize variables
         self._node_name = node_name
         self._load_model_counter = 0
+
+        self.bridge = CvBridge()
 
         # Timers to control the rate of the subscriber
         self._last_checkpoint_ts = rospy.get_time()
@@ -448,24 +451,36 @@ class WvnFeatureExtractor:
             return
 
         try:
-            # 1. 转 Tensor，归一化到 [0, 1] 进行 resize 操作
-            # 假设 rc.ros_image_to_torch 返回的是 float32，数值范围可能是 [0, 65535] 或者 [0, 1]
-            torch_depth = rc.ros_image_to_torch(depth_msg, device=self._ros_params.device)
+            # 1. 手动进行图像转换，绕过 rc.ros_image_to_torch 的类型限制
             
-            # 归一化 (uint16)
-            if torch_depth.max() > 1.0:
-                torch_depth = torch_depth / 65535.0
+            # A. cv_bridge 转换 (使用 passthrough 保持原始数据)
+            cv_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
+            
+            # B. 类型转换: uint16 -> float32
+            # 只有转换为 float32，PyTorch 的 to_tensor 才能处理
+            cv_image_float = cv_image.astype(np.float32)
+            
+            # C. 归一化 (原始值是 0-65535，除以 65535.0 变为 0.0-1.0)
+            # 这样后续的 resize 操作才是合理的
+            if cv_image_float.max() > 1.0:
+                cv_image_float = cv_image_float / 65535.0
+            
+            # D. 手动转换为 Tensor (H, W) -> (1, H, W)
+            # 注意：此时数值已经是 0.0-1.0 的 float32，不需要再用 ToTensor 做除法了
+            torch_depth = torch.from_numpy(cv_image_float).unsqueeze(0).to(self._ros_params.device)
             
             # 2. Resize (299x224 -> 224x224)
+            # 假设 resize_image 接受 (C, H, W) 格式的 tensor
             cropped_depth = self._camera_handler[cam]["depth_projector"].resize_image(torch_depth)
             
-            # 3. 反归一化 (恢复深度值)
-            depth_np = (cropped_depth * 65535.0).cpu().numpy().astype(np.uint16)
+            # 3. 反归一化并转回 CPU numpy
+            # 恢复到 0-65535 范围
+            depth_np = (cropped_depth * 65535.0).squeeze(0).cpu().numpy().astype(np.uint16)
             
             # 4. 转 ROS Msg
             msg = self.bridge.cv2_to_imgmsg(depth_np, "16UC1")
             
-            # 5. 时间戳同步，用 RGB 保存的时间戳
+            # 5. 时间戳同步
             msg.header.stamp = self._camera_handler[cam]["last_sync_stamp"]
             msg.header.frame_id = depth_msg.header.frame_id
             
