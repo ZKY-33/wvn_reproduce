@@ -513,7 +513,7 @@ class WvnFeatureExtractor:
         
         p_tmp = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
         # 如果临时文件不存在，尝试加载静态的预训练模型（用于纯推理模式）
-        p_static = join(WVN_ROOT_DIR, "assets/checkpoints/indoor_mpi.pt") 
+        p_static = join(WVN_ROOT_DIR, "assets/checkpoints/depth_20260205.pt") 
         
         target_path = None
         if os.path.exists(p_tmp):
