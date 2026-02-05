@@ -295,6 +295,8 @@ class WvnLearning:
             for cam in self._ros_params.camera_topics:
                 # Initialize camera handler for given cam
                 self._camera_handler[cam] = {}
+                # timestamp
+                self._camera_handler[cam]["last_sync_stamp"] = None 
                 # Store camera name
                 self._ros_params.camera_topics[cam]["name"] = cam
 
@@ -334,20 +336,20 @@ class WvnLearning:
                     sync.registerCallback(self.imagefeat_callback, self._ros_params.camera_topics[cam])
 
                 # subcribe and publishresized depth from feature_extractor node
-                # depth_relay_sub = rospy.Subscriber(
-                #     f"/wild_visual_navigation_node/{cam}/depth_input",
-                #     Image,
-                #     self.depth_relay_callback,
-                #     callback_args=cam,
-                #     queue_size=5, 
-                # )
-                # self._camera_handler[cam]["depth_relay_sub"] = depth_relay_sub
-                # depth_relay_pub = rospy.Publisher(
-                #     f"/wild_visual_navigation_node/{cam}/depth_relay", 
-                #     Image,
-                #     queue_size=5,
-                # )
-                # self._camera_handler[cam]["depth_relay_pub"] = depth_relay_pub
+                depth_relay_sub = rospy.Subscriber(
+                    f"/wild_visual_navigation_node/{cam}/depth_input",
+                    Image,
+                    self.depth_relay_callback,
+                    callback_args=cam,
+                    queue_size=5, 
+                )
+                self._camera_handler[cam]["depth_relay_sub"] = depth_relay_sub
+                depth_relay_pub = rospy.Publisher(
+                    f"/wild_visual_navigation_node/{cam}/depth_relay", 
+                    Image,
+                    queue_size=5,
+                )
+                self._camera_handler[cam]["depth_relay_pub"] = depth_relay_pub
 
             # Wait for features message to determine the input size of the model
             cam = list(self._ros_params.camera_topics.keys())[0]
