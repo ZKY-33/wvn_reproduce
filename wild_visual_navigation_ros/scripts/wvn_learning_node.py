@@ -93,7 +93,7 @@ class WvnLearning:
         )
 
         # control flag of model training or not
-        self._traversability_estimator.pause_learning = True
+        self._traversability_estimator.pause_learning = False
 
         self._friction_predict = 3.0         
         # Initialize traversability generator to process velocity commands
@@ -390,7 +390,7 @@ class WvnLearning:
         self._pub_graph_footprints = rospy.Publisher(
             "/wild_visual_navigation_node/graph_footprints", Marker, queue_size=10
         )
-        # outputs: 1D traversability, 16D latent variable
+        # outputs: 1D instant traversability, 16D latent variable
         self._pub_instant_traversability = rospy.Publisher(
             "/wild_visual_navigation_node/instant_traversability",
             Float32,
@@ -399,7 +399,7 @@ class WvnLearning:
         self._pub_system_state = rospy.Publisher(
             "/wild_visual_navigation_node/system_state", SystemState, queue_size=10
         )
-        self._pub_instant_latent_variable = rospy.Publisher("/wild_visual_navigation_node/instant_latent_variable",Float32MultiArray,queue_size=10,)
+        # self._pub_instant_latent_variable = rospy.Publisher("/wild_visual_navigation_node/instant_latent_variable",Float32MultiArray,queue_size=10,)
 
 
         # Services
@@ -674,6 +674,7 @@ class WvnLearning:
                 }
                 return
 
+            # calculate pose
             success, pose_cam_in_base = rc.ros_tf_to_torch(
                 self.query_tf(
                     self._ros_params.base_frame,
