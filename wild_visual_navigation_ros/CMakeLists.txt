@@ -21,6 +21,7 @@ catkin_package(
 catkin_python_setup()
 catkin_install_python(PROGRAMS  scripts/wvn_feature_extractor_node.py
                                 scripts/wvn_learning_node.py
+                                scripts/sam2_node.py
                                 scripts/overlay_images.py
                                 scripts/smart_carrot.py
                                 scripts/rosbag_play.sh

@@ -83,6 +83,7 @@ class RosFeatureExtractorNodeParams:
     dino_patch_size: int  # 8 or 16; 8 is finer
     dino_backbone: str  # vit_small, vit_base
     slic_num_components: int
+    
 
     # ConfidenceGenerator
     confidence_std_factor: float

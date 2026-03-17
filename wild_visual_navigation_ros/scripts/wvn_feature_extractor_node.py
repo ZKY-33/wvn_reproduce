@@ -16,6 +16,7 @@ from wild_visual_navigation.utils import ConfidenceGenerator
 from wild_visual_navigation.utils import AnomalyLoss
 
 import rospy
+import message_filters
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from std_msgs.msg import MultiArrayDimension
 
@@ -33,6 +34,7 @@ from prettytable import PrettyTable
 from termcolor import colored
 import os
 from cv_bridge import CvBridge
+import cv2
 
 
 class WvnFeatureExtractor:
@@ -196,24 +198,55 @@ class WvnFeatureExtractor:
             # Set subscribers RGB & Depth
             base_topic = self._ros_params.camera_topics[cam]["image_topic"].replace("/compressed", "")
             is_compressed = self._ros_params.camera_topics[cam]["image_topic"] != base_topic
-            if is_compressed:
-                # TODO study the effect of the buffer size
-                image_sub = rospy.Subscriber(
-                    self._ros_params.camera_topics[cam]["image_topic"],
-                    CompressedImage,
-                    self.image_callback,
-                    callback_args=cam,
-                    queue_size=1,
-                )
+            
+            sam2_topic = self._ros_params.camera_topics[cam].get("sam2_segmentation_topic", None)
+            if sam2_topic:
+                """如果resized_wide_angle_dualyaml里指明了sam2话题, 就进入sam2分支"""
+                # SAM2 模式：同步订阅 RGB 和 Mask
+                self._camera_handler[cam]["segmentation_mode"] = "sam2"
+                rospy.loginfo(f"[{self._node_name}] SAM2 mode. Subscribing to RGB and Mask...")
+                
+                # 1. RGB 订阅器
+                if is_compressed:
+                    rgb_sub = message_filters.Subscriber(self._ros_params.camera_topics[cam]["image_topic"], CompressedImage)
+                else:
+                    rgb_sub = message_filters.Subscriber(self._ros_params.camera_topics[cam]["image_topic"], Image)
+                
+                # 2. Mask 订阅器
+                mask_sub = message_filters.Subscriber(sam2_topic, Image)
+                
+                # 3. 时间同步器
+                ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, mask_sub], queue_size=10, slop=0.1)
+                ts.registerCallback(self.sam2_sync_callback, cam)
+
+                self._camera_handler[cam]["sync"] = ts
+                self._camera_handler[cam]["rgb_sub"] = rgb_sub
+                self._camera_handler[cam]["mask_sub"] = mask_sub
             else:
-                image_sub = rospy.Subscriber(
-                    self._ros_params.camera_topics[cam]["image_topic"],
-                    Image,
-                    self.image_callback,
-                    callback_args=cam,
-                    queue_size=1,
-                )
-            self._camera_handler[cam]["image_sub"] = image_sub
+                # 否则使用默认的 SLIC 模式
+                segmentation_mode = "slic"
+                rospy.loginfo(f"[{self._node_name}] SLIC mode (default) for cam '{cam}'. Subscribing to raw image.")
+                
+                self._camera_handler[cam]["segmentation_mode"] = "slic"
+                
+                # 原有的订阅逻辑
+                if is_compressed:
+                    image_sub = rospy.Subscriber(
+                        self._ros_params.camera_topics[cam]["image_topic"],
+                        CompressedImage,
+                        self.image_callback,
+                        callback_args=cam,
+                        queue_size=1,
+                    )
+                else:
+                    image_sub = rospy.Subscriber(
+                        self._ros_params.camera_topics[cam]["image_topic"],
+                        Image,
+                        self.image_callback,
+                        callback_args=cam,
+                        queue_size=1,
+                    )
+                self._camera_handler[cam]["image_sub"] = image_sub
 
             if "depth_topic" in self._ros_params.camera_topics[cam]:
                 depth_sub = rospy.Subscriber(
@@ -446,6 +479,152 @@ class WvnFeatureExtractor:
 
 
     @torch.no_grad()
+    def sam2_sync_callback(self, rgb_msg, mask_msg, cam):
+        """SAM2 模式回调：同步处理 RGB 和 Mask"""
+        # 1. 基础检查
+        ts = rgb_msg.header.stamp.to_sec()
+        if abs(ts - self._last_image_ts[cam]) < 1.0 / self._ros_params.image_callback_rate:
+            return
+        if self._camera_scheduler.get() != cam:
+            return
+        
+        # 计数器
+        if self._ros_params.verbose:
+            self._log_data[f"nr_images_{cam}"] += 1 
+            self._log_data[f"time_last_image_{cam}"] = rospy.get_time() # 修复时间戳显示问题
+            rospy.loginfo(f"[{self._node_name}] SAM2 Sync callback: {cam} -> Process")
+        
+        self._last_image_ts[cam] = ts
+        self._camera_handler[cam]["last_sync_stamp"] = rgb_msg.header.stamp
+
+        try:
+            # 2. 模型更新
+            self.load_model(rgb_msg.header.stamp)
+
+            # 3. 处理 RGB
+            if isinstance(rgb_msg, CompressedImage):
+                torch_image = rc.ros_compressed_image_to_torch(rgb_msg, device=self._ros_params.device)
+            else:
+                cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
+                
+                # 2. Copy 数组，使其变为可写，消除警告
+                cv_image = cv_image.copy()
+                
+                # 3. 转为 RGB 格式 (H, W, C)
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+                
+                # 4. 转为 Tensor (C, H, W) 并归一化到 [0, 1]
+                torch_image = torch.from_numpy(cv_image.transpose((2, 0, 1))).float() / 255.0
+                
+                # 5. 移动到 GPU
+                torch_image = torch_image.to(self._ros_params.device)
+            
+            torch_image = self._camera_handler[cam]["image_projector"].resize_image(torch_image)
+            C, H, W = torch_image.shape
+
+            # 4. 处理 Mask
+            # SAM2 发布的是 mono8，直接转换
+            cv_mask = self.bridge.imgmsg_to_cv2(mask_msg, desired_encoding="mono8")
+            cv_mask = cv_mask.copy()
+            
+            # 转换为 Tensor 并 Resize
+            mask_tensor = torch.from_numpy(cv_mask).to(self._ros_params.device).long()
+            mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0).float() # [1, 1, H, W]
+            mask_tensor = torch.nn.functional.interpolate(mask_tensor, size=(H, W), mode='nearest').long()
+
+            # 5. 特征提取
+            # 此时 external_seg 的格式与 SLIC 输出完全一致
+            _, feat, seg, center, dense_feat = self._feature_extractor.extract(
+                img=torch_image[None],
+                external_seg=mask_tensor,
+                return_centers=False,
+                return_dense_features=True,
+                n_random_pixels=100,
+            )
+
+            # 6. 预测与发布 (与原逻辑完全一致)
+            if self._ros_params.prediction_per_pixel:
+                data = Data(x=dense_feat[0].permute(1, 2, 0).reshape(-1, dense_feat.shape[1]))
+            else:
+                input_feat = feat[seg.reshape(-1)]
+                data = Data(x=input_feat)
+
+            prediction = self._model.forward(data)
+
+            # Predict traversability per feature
+            prediction = self._model.forward(data)
+
+            if not self.anomaly_detection:
+                out_trav = prediction.reshape(H, W, -1)[:, :, 0]
+            else:
+                losses = prediction["logprob"].sum(1) + prediction["log_det"]
+                confidence = self._confidence_generator.inference_without_update(x=-losses)
+                trav = confidence
+                out_trav = trav.reshape(H, W, -1)[:, :, 0]
+
+            msg = rc.numpy_to_ros_image(out_trav.cpu().numpy(), "passthrough")
+            msg.header = rgb_msg.header
+            msg.width = out_trav.shape[0]
+            msg.height = out_trav.shape[1]
+            self._camera_handler[cam]["trav_pub"].publish(msg)
+
+            msg = self._camera_handler[cam]["camera_info_msg_out"]
+            msg.header = rgb_msg.header
+            self._camera_handler[cam]["info_pub"].publish(msg)
+
+            # Publish image
+            if self._ros_params.camera_topics[cam]["publish_input_image"]:
+                msg = rc.numpy_to_ros_image(
+                    (torch_image.permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8),
+                    "rgb8",
+                )
+                msg.header = rgb_msg.header
+                msg.width = torch_image.shape[1]
+                msg.height = torch_image.shape[2]
+                self._camera_handler[cam]["input_pub"].publish(msg)
+
+            # Publish confidence
+            if self._ros_params.camera_topics[cam]["publish_confidence"]:
+                loss_reco = F.mse_loss(prediction[:, 1:], data.x, reduction="none").mean(dim=1)
+                confidence = self._confidence_generator.inference_without_update(x=loss_reco)
+                out_confidence = confidence.reshape(H, W)
+                msg = rc.numpy_to_ros_image(out_confidence.cpu().numpy(), "passthrough")
+                msg.header = rgb_msg.header
+                msg.width = out_confidence.shape[0]
+                msg.height = out_confidence.shape[1]
+                self._camera_handler[cam]["conf_pub"].publish(msg)
+
+            # Publish features and feature_segments
+            if self._ros_params.camera_topics[cam]["use_for_training"]:
+                msg = ImageFeatures()
+                msg.header = rgb_msg.header
+                msg.feature_segments = rc.numpy_to_ros_image(seg.cpu().numpy().astype(np.int32), "passthrough")
+                msg.feature_segments.header = rgb_msg.header
+                feat_np = feat.cpu().numpy()
+
+                mad1 = MultiArrayDimension()
+                mad1.label = "n"
+                mad1.size = feat_np.shape[0]
+                mad1.stride = feat_np.shape[0] * feat_np.shape[1]
+
+                mad2 = MultiArrayDimension()
+                mad2.label = "feat"
+                mad2.size = feat_np.shape[1]
+                mad2.stride = feat_np.shape[1]
+
+                msg.features.data = feat_np.flatten().tolist()
+                msg.features.layout.dim.append(mad1)
+                msg.features.layout.dim.append(mad2)
+                self._camera_handler[cam]["imagefeat_pub"].publish(msg)
+
+        except Exception as e:
+            rospy.logerr(f"[{self._node_name}] error in sam2_sync_callback: {e}")
+            traceback.print_exc()
+        
+        self._camera_scheduler.step()
+
+
+    @torch.no_grad()
     def depth_callback(self, depth_msg: Image, cam: str):
         if "last_sync_stamp" not in self._camera_handler[cam]:
             return
@@ -494,76 +673,179 @@ class WvnFeatureExtractor:
 
 
 
-    def load_model(self, stamp):
-        """Method to load the new model weights to perform inference on the incoming images
+    # def load_model(self, stamp):
+    #     """Method to load the new model weights to perform inference on the incoming images
 
-        Args:
-            None
-        """
+    #     Args:
+    #         None
+    #     """
+    #     ts = stamp.to_sec()
+    #     if abs(ts - self._last_checkpoint_ts) < 1.0 / self._ros_params.load_save_checkpoint_rate:
+    #         return
+
+    #     self._last_checkpoint_ts = ts
+
+    #     # self._load_model_counter += 1
+    #     # if self._load_model_counter % 10 == 0:
+    #     # p = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
+    #     # p = join(WVN_ROOT_DIR,"assets/checkpoints/mountain_bike_trail_fpr_0.25.pt")
+        
+    #     p_tmp = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
+    #     # 如果临时文件不存在，尝试加载静态的预训练模型（用于纯推理模式）
+    #     p_static = join(WVN_ROOT_DIR, "assets/checkpoints/depth_20260205.pt") 
+        
+    #     target_path = None
+    #     if os.path.exists(p_tmp):
+    #         target_path = p_tmp
+    #     elif os.path.exists(p_static):
+    #         # 仅在第一次发现静态文件时打印，避免刷屏
+    #         if not hasattr(self, '_static_model_loaded'):
+    #             rospy.loginfo(f"[{self._node_name}] Inference mode: Loading static model from {p_static}")
+    #             self._static_model_loaded = True
+    #         target_path = p_static
+    #     else:
+    #         # 如果两个文件都不存在，且还没加载过初始DINO权重（或其他初始权重），则使用初始化时的权重，保持静默或仅在首次报错
+    #         if not hasattr(self, '_initial_model_loaded'):
+    #             pass 
+    #         return
+
+    #     try:
+    #         new_model_state_dict = torch.load(target_path)
+    #         k = list(self._model.state_dict().keys())[-1]
+
+    #         # check if the key is in state dict
+    #         if k in new_model_state_dict:
+    #             current_state_k = self._model.state_dict()[k]
+    #             new_state_k = new_model_state_dict[k]
+    #             has_changed = False
+    #             if current_state_k.shape != new_state_k.shape:
+    #                 has_changed = True
+    #             else:
+    #                 if not torch.equal(current_state_k, new_state_k):
+    #                      has_changed = True
+
+    #             if has_changed:
+    #                 if self._ros_params.verbose:
+    #                     self._log_data[f"time_last_model"] = rospy.get_time()
+    #                     self._log_data[f"nr_model_updates"] += 1
+
+    #                 self._model.load_state_dict(new_model_state_dict, strict=False)
+                    
+    #                 if "confidence_generator" in new_model_state_dict.keys():
+    #                     cg = new_model_state_dict["confidence_generator"]
+    #                     self._confidence_generator.var = cg["var"]
+    #                     self._confidence_generator.mean = cg["mean"]
+    #                     self._confidence_generator.std = cg["std"]
+
+    #                     if self._ros_params.verbose:
+    #                         m, s, v = cg["mean"].item(), cg["std"].item(), cg["var"].item()
+    #                         rospy.loginfo(f"[{self._node_name}] Loaded Confidence Generator {m}, std {s} var {v}")
+    #     except Exception as e:
+    #         rospy.logerr(f"[{self._node_name}] Error loading model from {target_path}: {e}")
+        
+    def load_model(self, stamp):
+        """Method to load the new model weights to perform inference on the incoming images"""
         ts = stamp.to_sec()
         if abs(ts - self._last_checkpoint_ts) < 1.0 / self._ros_params.load_save_checkpoint_rate:
             return
 
         self._last_checkpoint_ts = ts
 
-        # self._load_model_counter += 1
-        # if self._load_model_counter % 10 == 0:
-        # p = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
-        # p = join(WVN_ROOT_DIR,"assets/checkpoints/mountain_bike_trail_fpr_0.25.pt")
-        
         p_tmp = join(WVN_ROOT_DIR, ".tmp_state_dict.pt")
-        # 如果临时文件不存在，尝试加载静态的预训练模型（用于纯推理模式）
-        p_static = join(WVN_ROOT_DIR, "assets/checkpoints/depth_20260205.pt") 
+        # 静态模型路径
+        p_static = join(WVN_ROOT_DIR, "assets/checkpoints/depth_20260205.pt")
         
         target_path = None
         if os.path.exists(p_tmp):
             target_path = p_tmp
         elif os.path.exists(p_static):
-            # 仅在第一次发现静态文件时打印，避免刷屏
             if not hasattr(self, '_static_model_loaded'):
                 rospy.loginfo(f"[{self._node_name}] Inference mode: Loading static model from {p_static}")
                 self._static_model_loaded = True
             target_path = p_static
         else:
-            # 如果两个文件都不存在，且还没加载过初始DINO权重（或其他初始权重），则使用初始化时的权重，保持静默或仅在首次报错
-            if not hasattr(self, '_initial_model_loaded'):
-                pass 
             return
 
-        try:
-            new_model_state_dict = torch.load(target_path)
-            k = list(self._model.state_dict().keys())[-1]
+        try: 
+            # 1. 尝试加载文件
+            # 注意：如果是 TorchScript 文件，torch.load 可能会返回模块，也可能会报错(取决于PyTorch版本)
+            # 我们先尝试直接加载
+            loaded_obj = torch.load(target_path, map_location=self._ros_params.device)
 
-            # check if the key is in state dict
-            if k in new_model_state_dict:
-                current_state_k = self._model.state_dict()[k]
-                new_state_k = new_model_state_dict[k]
-                has_changed = False
-                if current_state_k.shape != new_state_k.shape:
-                    has_changed = True
-                else:
-                    if not torch.equal(current_state_k, new_state_k):
-                         has_changed = True
+            # 2. 判断加载的对象类型
+            is_torchscript = isinstance(loaded_obj, torch.jit.ScriptModule)
+            is_state_dict = isinstance(loaded_obj, dict)
 
-                if has_changed:
-                    if self._ros_params.verbose:
-                        self._log_data[f"time_last_model"] = rospy.get_time()
-                        self._log_data[f"nr_model_updates"] += 1
-
-                    self._model.load_state_dict(new_model_state_dict, strict=False)
+            if is_torchscript:
+                # 情况 A: 加载的是 TorchScript 模型 
+                rospy.loginfo(f"[{self._node_name}] Detected TorchScript model. Replacing model instance.")
+                
+                # 直接替换模型对象
+                self._model = loaded_obj
+                
+                # 确保模型在正确的设备上并设置为评估模式
+                self._model.to(self._ros_params.device)
+                self._model.eval()
+                
+                # 记录更新
+                if self._ros_params.verbose:
+                    self._log_data[f"time_last_model"] = rospy.get_time()
+                    self._log_data[f"nr_model_updates"] += 1
                     
-                    if "confidence_generator" in new_model_state_dict.keys():
-                        cg = new_model_state_dict["confidence_generator"]
-                        self._confidence_generator.var = cg["var"]
-                        self._confidence_generator.mean = cg["mean"]
-                        self._confidence_generator.std = cg["std"]
+                # 清除标志位，表示已处理
+                if hasattr(self, '_static_model_loaded'):
+                    self._static_model_loaded = False # 允许后续加载新的临时模型
 
+            elif is_state_dict:
+                # 情况 B: 加载的是 State Dict 
+                new_model_state_dict = loaded_obj
+                
+                # 检查模型是否发生变化 
+                k = list(self._model.state_dict().keys())[-1]
+                if k in new_model_state_dict:
+                    current_state_k = self._model.state_dict()[k]
+                    new_state_k = new_model_state_dict[k]
+                    has_changed = False
+                    if current_state_k.shape != new_state_k.shape:
+                        has_changed = True
+                    else:
+                        if not torch.equal(current_state_k, new_state_k):
+                            has_changed = True
+
+                    if has_changed:
                         if self._ros_params.verbose:
-                            m, s, v = cg["mean"].item(), cg["std"].item(), cg["var"].item()
-                            rospy.loginfo(f"[{self._node_name}] Loaded Confidence Generator {m}, std {s} var {v}")
+                            self._log_data[f"time_last_model"] = rospy.get_time()
+                            self._log_data[f"nr_model_updates"] += 1
+
+                        self._model.load_state_dict(new_model_state_dict, strict=False)
+                        
+                        # 加载置信度生成器参数 
+                        if "confidence_generator" in new_model_state_dict.keys():
+                            cg = new_model_state_dict["confidence_generator"]
+                            if torch.isnan(cg["mean"]).any() or torch.isnan(cg["std"]).any():
+                                rospy.logwarn(f"[{self._node_name}] Detected NaN in confidence generator, skipping load for this part.")
+                            else:
+                                # 只有在没有 NaN 时才加载
+                                self._confidence_generator.var = cg["var"]
+                                self._confidence_generator.mean = cg["mean"]
+                                self._confidence_generator.std = cg["std"]
+
+                                if self._ros_params.verbose:
+                                    m, s, v = cg["mean"].item(), cg["std"].item(), cg["var"].item()
+
+                            if self._ros_params.verbose:
+                                m, s, v = cg["mean"].item(), cg["std"].item(), cg["var"].item()
+                                rospy.loginfo(f"[{self._node_name}] Loaded Confidence Generator {m}, std {s} var {v}")
+            else:
+                rospy.logerr(f"[{self._node_name}] Loaded unknown model format from {target_path}")
+
+
         except Exception as e:
             rospy.logerr(f"[{self._node_name}] Error loading model from {target_path}: {e}")
-        
+            import traceback
+            traceback.print_exc()
+
+
 
 if __name__ == "__main__":
     node_name = "wvn_feature_extractor_node"

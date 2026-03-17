@@ -1,0 +1,12 @@
+<launch>
+<!-- SAM2 node -->
+  <node name="sam2_node" pkg="wild_visual_navigation_ros" 
+        type="sam2_node.py" 
+        output="screen"
+        launch-prefix="/root/sam2_env/bin/python"> 
+        <!-- sam2 config & model -->
+         <param name="sam2_model_cfg" type="string" value="configs/sam2.1/sam2.1_hiera_t.yaml" />
+        <!-- checkpoint 必须使用绝对路径 -->
+        <param name="sam2_checkpoint" type="string" value="/root/catkin_ws/src/wild_visual_navigation/sam2/checkpoints/sam2.1_hiera_tiny.pt" />
+  </node>
+</launch>

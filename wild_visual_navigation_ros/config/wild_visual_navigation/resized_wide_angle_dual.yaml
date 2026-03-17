@@ -10,6 +10,7 @@ camera_topics:
     image_topic: "/wide_angle_camera_depth/image_color_rect_resize"
     depth_topic: "/wide_angle_camera_depth/image_depth_rect_resize"
     info_topic: "/wide_angle_camera_depth_resize/camera_info"
+    sam2_segmentation_topic: "/sam2/segmentation"
     use_for_training: true
     publish_confidence: true
     publish_input_image: true

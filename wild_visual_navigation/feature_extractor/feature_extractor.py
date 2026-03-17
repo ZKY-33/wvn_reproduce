@@ -20,7 +20,7 @@ class FeatureExtractor:
     def __init__(
         self,
         device: str,
-        segmentation_type: str = "slic",
+        segmentation_type: str = "slic",  # slic，sam2
         feature_type: str = "dino",
         input_size: int = 448,
         **kwargs,
@@ -89,43 +89,96 @@ class FeatureExtractor:
                 compactness=kwargs.get("slic_compactness", 10),
             )
 
+        elif self.segmentation_type == "sam2":
+            # 在外部wvn_feature_extractor节点订阅sam2的segmentation
+            pass
+
         elif self.segmentation_type == "random":
             pass
 
+    # def extract(self, img, **kwargs):
+    #     if self._segmentation_type == "random":
+    #         dense_feat = self.compute_features(img, None, None, **kwargs)
+
+    #         H, W = img.shape[2:]
+    #         nr = kwargs.get("n_random_pixels", 100)
+
+    #         seg = torch.full((H * W,), -1, dtype=torch.long, device=self._device)
+    #         indices = torch.randperm(H * W, device=self._device)[:nr]
+    #         seg[indices] = torch.arange(0, nr, device=self._device)
+    #         seg = seg.reshape(H, W)
+    #         feat = dense_feat[0].reshape(dense_feat.shape[1], H * W)[:, indices].T
+
+    #         if kwargs.get("return_dense_features", False):
+    #             return None, feat, seg, None, dense_feat
+
+    #         return None, feat, seg, None, None
+
+    #     # Compute segments, their centers, and edges connecting them (graph structure)
+    #     # with Timer("feature_extractor - compute_segments"):
+    #     edges, seg, center = self.compute_segments(img, **kwargs)
+
+    #     # Compute features
+    #     # with Timer("feature_extractor - compute_features"):
+    #     dense_feat = self.compute_features(img, seg, center, **kwargs)
+
+    #     # with Timer("feature_extractor - compute_features"):
+    #     # Sparsify features to match the centers if required
+    #     feat = self.sparsify_features(dense_feat, seg)
+
+    #     if kwargs.get("return_dense_features", False):
+    #         return edges, feat, seg, center, dense_feat
+
+    #     return edges, feat, seg, center, None
+
     def extract(self, img, **kwargs):
-        if self._segmentation_type == "random":
-            dense_feat = self.compute_features(img, None, None, **kwargs)
+        # 1. 检查外部分割 Mask (SAM2 模式)
+        external_seg = kwargs.get("external_seg", None)
+        
+        # 初始化变量
+        edges = None
+        seg = None
+        center = None
+        
+        if external_seg is not None:
+            # --- SAM2 分支 ---
+            seg = external_seg
+            # 调整维度: 确保是 [H, W]
+            if seg.ndim == 4: seg = seg.squeeze(1) # [B, 1, H, W] -> [B, H, W]
+            if seg.ndim == 3: seg = seg[0]         # [B, H, W] -> [H, W]
+            
+            # 计算中心点 (Center)，修改调用逻辑，让 compute_segments 也支持外部 seg
+            edges, seg, center = self.compute_segments(img, force_seg=seg, **kwargs)
+            
+        else:
+            # --- 原有逻辑 (SLIC / Random) ---
+            if self._segmentation_type == "random":
+                dense_feat = self.compute_features(img, None, None, **kwargs)
+                H, W = img.shape[2:]
+                nr = kwargs.get("n_random_pixels", 100)
+                seg = torch.full((H * W,), -1, dtype=torch.long, device=self._device)
+                indices = torch.randperm(H * W, device=self._device)[:nr]
+                seg[indices] = torch.arange(0, nr, device=self._device)
+                seg = seg.reshape(H, W)
+                feat = dense_feat[0].reshape(dense_feat.shape[1], H * W)[:, indices].T
+                if kwargs.get("return_dense_features", False):
+                    return None, feat, seg, None, dense_feat
+                return None, feat, seg, None, None
+            
+            # 正常的 SLIC 流程
+            edges, seg, center = self.compute_segments(img, **kwargs)
 
-            H, W = img.shape[2:]
-            nr = kwargs.get("n_random_pixels", 100)
-
-            seg = torch.full((H * W,), -1, dtype=torch.long, device=self._device)
-            indices = torch.randperm(H * W, device=self._device)[:nr]
-            seg[indices] = torch.arange(0, nr, device=self._device)
-            seg = seg.reshape(H, W)
-            feat = dense_feat[0].reshape(dense_feat.shape[1], H * W)[:, indices].T
-
-            if kwargs.get("return_dense_features", False):
-                return None, feat, seg, None, dense_feat
-
-            return None, feat, seg, None, None
-
-        # Compute segments, their centers, and edges connecting them (graph structure)
-        # with Timer("feature_extractor - compute_segments"):
-        edges, seg, center = self.compute_segments(img, **kwargs)
-
-        # Compute features
-        # with Timer("feature_extractor - compute_features"):
+        # 2. 统一进行特征提取
         dense_feat = self.compute_features(img, seg, center, **kwargs)
 
-        # with Timer("feature_extractor - compute_features"):
-        # Sparsify features to match the centers if required
+        # 3. 特征稀疏化 (Sparsify)
         feat = self.sparsify_features(dense_feat, seg)
 
         if kwargs.get("return_dense_features", False):
             return edges, feat, seg, center, dense_feat
 
         return edges, feat, seg, center, None
+
 
     @property
     def feature_type(self):
@@ -148,33 +201,93 @@ class FeatureExtractor:
         self._device = device
         self._extractor.change_device(device)
 
+    # def compute_segments(self, img: torch.tensor, **kwargs):
+    #     if self._segmentation_type == "none" or self._segmentation_type is None:
+    #         edges, seg, centers = self.segment_pixelwise(img, **kwargs)
+
+    #     elif self._segmentation_type == "grid":
+    #         seg = self.segment_grid(img, **kwargs)
+
+    #     elif self._segmentation_type == "slic":
+    #         seg = self.segment_slic(img, **kwargs)
+
+    #     elif self._segmentation_type == "stego":
+    #         seg = self.segment_stego(img, **kwargs)
+
+    #     elif self._segmentation_type == "random":
+    #         seg = self.segment_random(img, **kwargs)
+
+    #     else:
+    #         raise f"segmentation_type [{self._segmentation_type}] not supported"
+
+    #     # Compute edges and centers
+    #     if self._segmentation_type != "none" and self._segmentation_type is not None:
+    #         # Extract adjacency_list based on segments
+    #         edges = self.segment_extractor.adjacency_list(seg)
+    #         # Extract centers
+    #         centers = self.segment_extractor.centers(seg)
+
+    #     return edges.T, seg[0, 0], centers
+
     def compute_segments(self, img: torch.tensor, **kwargs):
-        if self._segmentation_type == "none" or self._segmentation_type is None:
-            edges, seg, centers = self.segment_pixelwise(img, **kwargs)
-
-        elif self._segmentation_type == "grid":
-            seg = self.segment_grid(img, **kwargs)
-
-        elif self._segmentation_type == "slic":
-            seg = self.segment_slic(img, **kwargs)
-
-        elif self._segmentation_type == "stego":
-            seg = self.segment_stego(img, **kwargs)
-
-        elif self._segmentation_type == "random":
-            seg = self.segment_random(img, **kwargs)
+        # 1. 检查是否有外部传入的分割 Mask (例如来自 SAM2)
+        external_seg = kwargs.get("external_seg", None)
+        
+        if external_seg is not None:
+            # SAM2 分支：直接使用外部 Mask
+            seg = external_seg
+            
+            # 确保 seg 的维度正确
+            # compute_segments 期望 seg 是，例如 shape=[H, W]
+            # 而 adjacency_list 和 centers 可能需要特定维度
+            # 原代码中 seg[0,0] 暗示输入 seg 可能是 [B, 1, H, W]
+            # 这里统一处理：
+            if seg.ndim == 2:
+                # 如果是 [H, W]，扩展为 [1, 1, H, W] 以适配后续 centers/adjacency 逻辑
+                seg = seg[None, None, :, :]
+            elif seg.ndim == 3:
+                # 如果是 [B, H, W]，扩展为 [B, 1, H, W]
+                seg = seg[:, None, :, :]
+            
+            # 此时 seg 形状应为 [1, 1, H, W]
+            # 既然有了 seg，就不需要运行 SLIC/Random 等内部分割了
+            pass 
 
         else:
-            raise f"segmentation_type [{self._segmentation_type}] not supported"
+            # --- 原有逻辑 (SLIC / Grid / Stego 等) ---
+            if self._segmentation_type == "none" or self._segmentation_type is None:
+                edges, seg, centers = self.segment_pixelwise(img, **kwargs)
+                if self._segmentation_type == "none" or self._segmentation_type is None:
+                     edges, seg, centers = self.segment_pixelwise(img, **kwargs)
+                     return edges, seg, centers
+
+            elif self._segmentation_type == "grid":
+                seg = self.segment_grid(img, **kwargs)
+
+            elif self._segmentation_type == "slic":
+                seg = self.segment_slic(img, **kwargs)
+
+            elif self._segmentation_type == "stego":
+                seg = self.segment_stego(img, **kwargs)
+
+            elif self._segmentation_type == "random":
+                seg = self.segment_random(img, **kwargs)
+
+            else:
+                raise f"segmentation_type [{self._segmentation_type}] not supported"
 
         # Compute edges and centers
-        if self._segmentation_type != "none" and self._segmentation_type is not None:
+        # 只有非 pixelwise 且非 None 的情况会执行到这里
+        # SAM2 的 external_seg 分支也会执行到这里，因为它是基于 seg 计算图结构
+        if self._segmentation_type != "none" and self._segmentation_type is not None or external_seg is not None:
             # Extract adjacency_list based on segments
             edges = self.segment_extractor.adjacency_list(seg)
             # Extract centers
             centers = self.segment_extractor.centers(seg)
 
         return edges.T, seg[0, 0], centers
+
+
 
     def segment_pixelwise(self, img, **kwargs):
         # Generate pixel-wise segmentation
