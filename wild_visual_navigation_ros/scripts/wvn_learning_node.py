@@ -43,6 +43,7 @@ from typing import Optional
 import traceback
 import signal
 import sys
+import math
 
 
 def time_func():
@@ -77,6 +78,7 @@ class WvnLearning:
 
         with read_write(self._params):
             self._params.general.model_path = model_path
+
 
         # Initialize traversability estimator
         self._traversability_estimator = TraversabilityEstimator(
@@ -788,7 +790,7 @@ class WvnLearning:
         """Callback to process friction prediction info.
 
         Args:
-            msg (std_msgs/Float32): Friction prediction value (1.0 to 4.0)
+            msg (std_msgs/Float32): Friction prediction value 
         """
         if not self._setup_ready:
             return
@@ -801,13 +803,21 @@ class WvnLearning:
         try:
             friction_val = msg.data
             # validity check
-            if friction_val < 1.0 or friction_val > 4.0:
+            if math.isnan(friction_val):
+                rospy.logwarn_throttle(5.0, f"[{self._node_name}] Received NaN friction value. Ignoring.")
+                return
+            
+            MIN_FRICTION = self._ros_params.min_friction
+            MAX_FRICTION = self._ros_params.max_friction
+            
+            if friction_val < MIN_FRICTION or friction_val > MAX_FRICTION:
                 rospy.logwarn_throttle(
                     5.0, 
                     f"[{self._node_name}] Received friction value {friction_val} out of bounds. Clamping."
                 )
-                friction_val = max(1.0, min(friction_val, 4.0))
-
+                friction_val = max(MIN_FRICTION, min(friction_val, MAX_FRICTION))
+                return
+            
             # update
             self._friction_predict = float(friction_val)
 

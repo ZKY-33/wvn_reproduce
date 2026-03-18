@@ -61,7 +61,10 @@ class RosLearningNodeParams:
 
     extraction_store_folder: str
 
-    # # friction
+    # friction
+    min_friction: float
+    max_friction: float
+
     # friction_predict_topic: str = "/firction_predict" 
     # # latent variable
     # latent_variable_topic: str = "/him_est"

@@ -49,6 +49,10 @@ device: "cuda"
 mode: "debug"                      # Options: "online", "debug", "extract_labels"; Sets operation mode of both nodes
 colormap: "RdYlBu"
 
+# Friction constraints
+min_friction: 2.0
+max_friction: 5.0
+
 print_image_callback_time: false
 print_supervision_callback_time: false
 log_time: false

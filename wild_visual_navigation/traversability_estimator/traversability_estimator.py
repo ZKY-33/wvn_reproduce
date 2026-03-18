@@ -461,19 +461,34 @@ class TraversabilityEstimator:
             # Prepare new batch
             graph = self.make_batch(self._params["ablation_data_module"]["batch_size"])
             if graph is not None:
+                # Nan值检查
+                if hasattr(graph, 'x') and (torch.isnan(graph.x).any() or torch.isinf(graph.x).any()):
+                    rospy.logwarn(f"[TraversabilityEstimator] Detected NaN/Inf in input graph features! Skipping step.")
+                    return_dict["loss_total"] = -1
+                    return return_dict
                 with self._learning_lock:
                     # Forward pass
-
                     res = self._model(graph)
 
                     log_step = (self._step % 20) == 0
                     self._loss, loss_aux, trav = self._traversability_loss(
                         graph, res, step=self._step, log_step=log_step
                     )
-
+                    # Nan值检查
+                    if torch.isnan(self._loss) or torch.isinf(self._loss):
+                        rospy.logerr(f"[TraversabilityEstimator] NaN/Inf loss detected! Skipping backward pass.")
+                        self._optimizer.zero_grad() # 清空可能的脏梯度
+                        return_dict["loss_total"] = -1
+                        return return_dict
+                    
                     # Backprop
                     self._optimizer.zero_grad()
                     self._loss.backward()
+                    
+                    # 关键防护：限制梯度范数，防止室外复杂场景导致的梯度爆炸
+                    # max_norm=1.0 是一个常用的保守值，可以根据情况调整为 0.5 或 5.0
+                    torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=1.0)
+                    
                     self._optimizer.step()
 
                 # Print losses
