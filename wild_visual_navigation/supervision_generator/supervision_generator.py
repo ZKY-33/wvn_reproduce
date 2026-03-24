@@ -114,15 +114,15 @@ class SupervisionGenerator:
         else:
             friction_tensor = friction_override.to(self.device)
 
-        S = self.get_velocity_selection_matrix(velocities).to(self.device)
+        # S = self.get_velocity_selection_matrix(velocities).to(self.device)
 
         # Compute discrepancy
-        error = (torch.nn.functional.mse_loss(S @ current_velocity, S @ desired_velocity)) / max_velocity
+        # error = (torch.nn.functional.mse_loss(S @ current_velocity, S @ desired_velocity)) / max_velocity
 
         # Filtering stage
-        with torch.no_grad():
-            self._state, self._cov = self._kalman_filter_(self._state, self._cov, error)
-        error = self._state
+        # with torch.no_grad():
+        #     self._state, self._cov = self._kalman_filter_(self._state, self._cov, error)
+        # error = self._state
 
         # Note: The way we use the sigmoid is a bit hacky
         # We use negative argument to revert sigmoid (smaller errors -> 1.0) and stretch the errors
@@ -134,7 +134,6 @@ class SupervisionGenerator:
         self._traversability_var = torch.tensor([1.0]).to(
             self._traversability.device
         )  # This needs to be improved, the KF can help
-
         
 
         # Apply threshold to detect hard obstacles

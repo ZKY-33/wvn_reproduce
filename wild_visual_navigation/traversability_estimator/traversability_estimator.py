@@ -26,6 +26,8 @@ import os
 import pickle
 import torch
 import torchvision.transforms as transforms
+import rospy
+
 
 to_tensor = transforms.ToTensor()
 

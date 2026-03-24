@@ -273,24 +273,31 @@ class WvnLearning:
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
             # Robot state callback
-            robot_state_sub = message_filters.Subscriber(self._ros_params.robot_state_topic, RobotState)
-            cache1 = message_filters.Cache(robot_state_sub, 10)  # noqa: F841
-            desired_twist_sub = message_filters.Subscriber(self._ros_params.desired_twist_topic, TwistStamped)
-            cache2 = message_filters.Cache(desired_twist_sub, 10)  # noqa: F841
+            # 重构robot state消息订阅，删去desired_twist_topic接口
 
-            self._robot_state_sub = message_filters.ApproximateTimeSynchronizer(
-                [robot_state_sub, desired_twist_sub], queue_size=10, slop=0.5
+            # robot_state_sub = message_filters.Subscriber(self._ros_params.robot_state_topic, RobotState)
+            # cache1 = message_filters.Cache(robot_state_sub, 10)  # noqa: F841
+            # desired_twist_sub = message_filters.Subscriber(self._ros_params.desired_twist_topic, TwistStamped)
+            # cache2 = message_filters.Cache(desired_twist_sub, 10)  # noqa: F841
+
+            # self._robot_state_sub = message_filters.ApproximateTimeSynchronizer(
+            #     [robot_state_sub, desired_twist_sub], queue_size=10, slop=0.5
+            # )
+
+            self._robot_state_sub = rospy.Subscriber(
+                self._ros_params.robot_state_topic, 
+                RobotState, 
+                self.robot_state_callback
             )
-
             rospy.loginfo(
                 f"[{self._node_name}] Start waiting for RobotState topic {self._ros_params.robot_state_topic} being published!"
             )
             rospy.wait_for_message(self._ros_params.robot_state_topic, RobotState)
-            rospy.loginfo(
-                f"[{self._node_name}] Start waiting for TwistStamped topic {self._ros_params.desired_twist_topic} being published!"
-            )
-            rospy.wait_for_message(self._ros_params.desired_twist_topic, TwistStamped)
-            self._robot_state_sub.registerCallback(self.robot_state_callback)
+            # rospy.loginfo(
+            #     f"[{self._node_name}] Start waiting for TwistStamped topic {self._ros_params.desired_twist_topic} being published!"
+            # )
+            # rospy.wait_for_message(self._ros_params.desired_twist_topic, TwistStamped)
+            # self._robot_state_sub.registerCallback(self.robot_state_callback)
 
             self._camera_handler = {}
             # Image callback
@@ -506,12 +513,12 @@ class WvnLearning:
         self._learning_thread_stop_event.clear()
 
     @accumulate_time
-    def robot_state_callback(self, state_msg, desired_twist_msg: TwistStamped):
+    def robot_state_callback(self, state_msg):
         """Main callback to process supervision info (robot state)
 
         Args:
             state_msg (wild_visual_navigation_msgs/RobotState): Robot state message
-            desired_twist_msg (geometry_msgs/TwistStamped): Desired twist message
+            删除: desired_twist_msg (geometry_msgs/TwistStamped): Desired twist message, type: TwistStamped
         """
         if not self._setup_ready:
             return
@@ -562,14 +569,18 @@ class WvnLearning:
                 return
 
             # The footprint requires a correction: we use the same orientation as the base
-            pose_footprint_in_base[:3, :3] = torch.eye(3, device=self._ros_params.device)
+            # 显式克隆避免原地修改报错
+            corrected_pose_footprint = pose_footprint_in_base.clone()
+            corrected_pose_footprint[:3, :3] = torch.eye(3, device=self._ros_params.device)
 
             # Convert state to tensor
             supervision_tensor, supervision_labels = rc.wvn_robot_state_to_torch(
                 state_msg, device=self._ros_params.device
             )
             current_twist_tensor = rc.twist_stamped_to_torch(state_msg.twist, device=self._ros_params.device)
-            desired_twist_tensor = rc.twist_stamped_to_torch(desired_twist_msg, device=self._ros_params.device)
+            # 删去desired_twist_msg相关使用
+            # desired_twist_tensor = rc.twist_stamped_to_torch(desired_twist_msg, device=self._ros_params.device)
+            desired_twist_tensor = current_twist_tensor
 
             # Update friction_predict & traversability
             current_friction = self._friction_predict
@@ -585,7 +596,7 @@ class WvnLearning:
             supervision_node = SupervisionNode(
                 timestamp=ts,
                 pose_base_in_world=pose_base_in_world,
-                pose_footprint_in_base=pose_footprint_in_base,
+                pose_footprint_in_base=corrected_pose_footprint,
                 twist_in_base=current_twist_tensor,
                 desired_twist_in_base=desired_twist_tensor,
                 width=self._ros_params.robot_width,
@@ -613,7 +624,7 @@ class WvnLearning:
 
         except Exception as e:
             traceback.print_exc()
-            rospy.logerr(f"[{self._node_name}] error state callback", e)
+            rospy.logerr(f"[{self._node_name}] error state callback: {e}")
             self._system_events["robot_state_callback_state"] = {
                 "time": time_func(),
                 "value": f"failed to execute {e}",
@@ -629,6 +640,11 @@ class WvnLearning:
             imagefeat_msg (wild_visual_navigation_msg/ImageFeatures): Incoming imagefeatures
             info_msg (sensor_msgs/CameraInfo): Camera info message associated to the image
         """
+        # debug
+        # if len(args) == 4: imagefeat_msg = args[0]
+        # else: imagefeat_msg = args[0]
+        # rospy.loginfo(f"[LEARNING NODE] Received ImageFeatures msg! Stamp: {imagefeat_msg.header.stamp.to_sec()}")
+        
         if not self._setup_ready:
             return
 
@@ -653,6 +669,8 @@ class WvnLearning:
             # Run the callback so as to match the desired rate
             ts = imagefeat_msg.header.stamp.to_sec()
             if abs(ts - self._last_image_ts) < 1.0 / self._ros_params.image_callback_rate:
+                # 新增丢弃相关打印
+                # rospy.logwarn(f"[LEARNING NODE] Dropped due to rate limit. Delta: {ts - self._last_image_ts}") 
                 return
             self._last_image_ts = ts
 
@@ -670,6 +688,8 @@ class WvnLearning:
                 device=self._ros_params.device,
             )
             if not success:
+                # rospy.logwarn(f"[{self._node_name}] TF Lookup failed! Cannot create mission node.")
+    
                 self._system_events["image_callback_canceled"] = {
                     "time": time_func(),
                     "value": "canceled due to pose_base_in_world",
@@ -744,6 +764,10 @@ class WvnLearning:
 
                 # Publish supervision data depending on the mode
                 self.visualize_image_overlay()
+
+                # debug
+                # rospy.loginfo(f"[DEBUG] Attempting to add mission node. Features shape: {mission_node.features.shape}")
+                # added_new_node = self._traversability_estimator.add_mission_node(mission_node)
 
                 if added_new_node:
                     self._traversability_estimator.update_visualization_node()

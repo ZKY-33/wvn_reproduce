@@ -27,7 +27,7 @@ class SAM2Node:
         rospy.init_node('sam2_node')
 
         self.bridge = CvBridge()
-        # 1. ROS 通信设置, 订阅压缩图像 
+        # 1. ROS 通信设置, 订阅图像 
         self.sub = rospy.Subscriber("/wide_angle_camera_depth/image_color_rect_resize", Image, self.image_callback, queue_size=1, buff_size=2**24)
         # 发布分割结果 带mask的Image和可视化的Image
         self.pub = rospy.Publisher("/sam2/segmentation", Image, queue_size=1)
@@ -143,8 +143,8 @@ class SAM2Node:
                     final_panel[best_mask_bool] = current_region_id
                     current_region_id += 1
             
-            infer_end = time.time()
-            rospy.loginfo(f"[Timer] Inference Time: {(infer_end - infer_start)*1000:.2f} ms | Found Regions: {current_region_id - 1}")
+            # infer_end = time.time()
+            # rospy.loginfo(f"[Timer] Inference Time: {(infer_end - infer_start)*1000:.2f} ms | Found Regions: {current_region_id - 1}")
 
             # 5. 后处理与可视化准备
             # final_panel 中：0=背景, 1=区域1, 2=区域2 ...
