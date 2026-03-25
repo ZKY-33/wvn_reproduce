@@ -16,6 +16,7 @@ from wild_visual_navigation.utils import Data
 import os
 import torch
 from typing import Optional
+import rospy
 
 
 class BaseNode:
@@ -91,6 +92,41 @@ class BaseNode:
             .log()[:3]
             .norm()
         )
+
+        # # === [修复] 兼容 Tensor 和 SE3 对象 ===
+        # def to_safe_matrix(pose_obj):
+        #     # 情况 1: 是 SE3 对象 (有 matrix 方法)
+        #     if hasattr(pose_obj, 'matrix'):
+        #         # 调用 matrix() 会在内部触发 lazy wrapper 并返回 Tensor
+        #         return pose_obj.matrix().clone() # 使用 clone() 确保独立内存
+            
+        #     # 情况 2: 是 Tensor (没有 matrix 方法)
+        #     elif hasattr(pose_obj, 'detach'):
+        #         # 直接克隆 Tensor
+        #         return pose_obj.detach().clone()
+            
+        #     else:
+        #         raise TypeError(f"Unsupported pose type: {type(pose_obj)}")
+
+        # try:
+        #     # 1. 安全地获取独立的矩阵
+        #     mat_self = to_safe_matrix(self.pose_base_in_world)
+        #     mat_other = to_safe_matrix(other.pose_base_in_world)
+
+        #     # 2. 计算相对变换矩阵: T_rel = T_self^-1 * T_other
+        #     # 注意：对于 4x4 变换矩阵，PyTorch 的 inverse() 是正确的
+        #     relative_pose_matrix = mat_self.inverse() @ mat_other
+
+        #     # 3. 使用 SE3.from_matrix 构造对象以计算 log
+        #     # 这一步将 Tensor 转回 SE3 对象用于计算距离
+        #     relative_pose = SE3.from_matrix(relative_pose_matrix, normalize=True)
+            
+        #     return relative_pose.log()[:3].norm()
+
+        # except Exception as e:
+        #     # 如果出错，打印警告并返回无穷大，防止节点崩溃
+        #     rospy.logwarn_throttle(5.0, f"[Nodes] distance_to calculation failed: {e}")
+        #     return float('inf')
 
     @property
     def name(self):

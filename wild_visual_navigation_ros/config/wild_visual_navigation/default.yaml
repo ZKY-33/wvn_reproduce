@@ -50,8 +50,8 @@ mode: "debug"                      # Options: "online", "debug", "extract_labels
 colormap: "RdYlBu"
 
 # Friction constraints
-min_friction: 1.0
-max_friction: 5.0
+min_friction: 0.8
+max_friction: 3.5
 
 print_image_callback_time: false
 print_supervision_callback_time: false

@@ -23,7 +23,8 @@ from wild_visual_navigation.utils import WVNMode, create_experiment_folder
 from wild_visual_navigation.cfg import ExperimentParams, RosLearningNodeParams
 
 from std_srvs.srv import SetBool, Trigger, TriggerResponse
-from geometry_msgs.msg import PoseStamped, Point, TwistStamped
+from geometry_msgs.msg import PoseStamped, Point, TwistStamped, PointStamped
+from tf2_geometry_msgs import do_transform_point
 from nav_msgs.msg import Path
 from sensor_msgs.msg import Image, CameraInfo
 from std_msgs.msg import ColorRGBA, Float32, Float32MultiArray
@@ -31,6 +32,8 @@ from visualization_msgs.msg import Marker
 import tf2_ros
 import rospy
 import message_filters
+import cv2  
+from cv_bridge import CvBridge 
 
 from pytictac import ClassTimer, ClassContextTimer, accumulate_time
 from omegaconf import OmegaConf, read_write
@@ -72,6 +75,7 @@ class WvnLearning:
 
         # Visualization
         self._color_palette = sns.color_palette(self._ros_params.colormap, as_cmap=True)
+        self._bridge = CvBridge()
 
         # Setup Mission Folder
         model_path = create_experiment_folder(self._params)
@@ -97,7 +101,7 @@ class WvnLearning:
         # control flag of model training or not
         self._traversability_estimator.pause_learning = False
 
-        self._friction_predict = 3.0         
+        self._friction_predict = 2.0  # 先做声明避免报错
         # Initialize traversability generator to process velocity commands
         self._supervision_generator = SupervisionGenerator(
             device=self._ros_params.device,
@@ -105,12 +109,14 @@ class WvnLearning:
             kf_meas_cov=10,
             kf_outlier_rejection="huber",
             kf_outlier_rejection_delta=0.5,
-            sigmoid_slope=20,
-            sigmoid_cutoff=2.5,   
+            sigmoid_slope=20,   
+            sigmoid_cutoff=0.4,   
             untraversable_thr=self._ros_params.untraversable_thr,  # 0.1
             time_horizon=0.05,
             graph_max_length=1,
-            friction_predict = self._friction_predict, # subscribe rostopic /friction_predict
+            friction_predict = self._friction_predict, # value from subscriber: /friction_predict
+            min_friction = self._ros_params.min_friction,
+            max_friction = self._ros_params.max_friction
         )
 
         # Initialize latent variable generator 
@@ -399,6 +405,12 @@ class WvnLearning:
         self._pub_graph_footprints = rospy.Publisher(
             "/wild_visual_navigation_node/graph_footprints", Marker, queue_size=10
         )
+        # 新增：足尖可视化图像
+        self._pub_footstep_image = rospy.Publisher(
+            "/wild_visual_navigation_node/footstep_image", 
+            Image, 
+            queue_size=10
+        )
         # outputs: 1D instant traversability, 16D latent variable
         self._pub_instant_traversability = rospy.Publisher(
             "/wild_visual_navigation_node/instant_traversability",
@@ -657,6 +669,14 @@ class WvnLearning:
 
         cam_name = camera_options['name']
 
+        # 新增：缓存相机信息和图像用于可视化 
+        # 将相机内参和原始图像存入 handler，供 visualize_supervision 使用
+        if cam_name in self._camera_handler:
+            self._camera_handler[cam_name]['last_info'] = info_msg
+            if self._ros_params.mode == WVNMode.DEBUG:
+                self._camera_handler[cam_name]['last_image'] = image_msg
+
+
         self._system_events["image_callback_received"] = {
             "time": time_func(),
             "value": "message received",
@@ -785,7 +805,7 @@ class WvnLearning:
 
         except Exception as e:
             traceback.print_exc()
-            rospy.logerr(f"[{self._node_name}] error image callback", e)
+            rospy.logerr(f"[{self._node_name}] error image callback: {e}")
             self._system_events["image_callback_state"] = {
                 "time": time_func(),
                 "value": f"failed to execute {e}",
@@ -840,7 +860,6 @@ class WvnLearning:
                     f"[{self._node_name}] Received friction value {friction_val} out of bounds. Clamping."
                 )
                 friction_val = max(MIN_FRICTION, min(friction_val, MAX_FRICTION))
-                return
             
             # update
             self._friction_predict = float(friction_val)
@@ -890,6 +909,34 @@ class WvnLearning:
         footprints_marker.pose.position.x = 0.0
         footprints_marker.pose.position.y = 0.0
         footprints_marker.pose.position.z = 0.0
+
+        # 新增：足尖可视化到图像里
+        debug_image = None
+        camera_frame = None
+        
+        # 寻找第一个可用的相机数据进行可视化 (通常只有一个相机)
+        if hasattr(self, '_camera_handler'):
+            for cam_name, handler in self._camera_handler.items():
+                if 'last_image' in handler and 'last_info' in handler:
+                    try:
+                        # 转换图像为 OpenCV 格式
+                        # 确保 CvBridge 已初始化
+                        if not hasattr(self, '_bridge'):
+                            from cv_bridge import CvBridge
+                            self._bridge = CvBridge()
+                            
+                        debug_image = self._bridge.imgmsg_to_cv2(handler['last_image'], "bgr8").copy()
+                        
+                        # 提取相机内参
+                        K = handler['last_info'].K
+                        fx, fy = K[0], K[4]
+                        cx, cy = K[2], K[5]
+                        camera_frame = handler['last_info'].header.frame_id
+                        break # 只处理第一个找到的相机
+                    except Exception as e:
+                        rospy.logwarn(f"[{self._node_name}] Failed to prepare debug image: {e}")
+                        debug_image = None
+
 
         last_points = [None, None]
         for node in self._traversability_estimator.get_supervision_nodes():
@@ -950,6 +997,43 @@ class WvnLearning:
                     footprints_marker.points.append(p)
                     footprints_marker.colors.append(c)
 
+            # 新增：将足尖投影到图像 
+            if debug_image is not None and camera_frame is not None:
+                for i in range(2):
+                    # 1. 构建 World 坐标系下的点
+                    p_world = PointStamped()
+                    p_world.header.frame_id = self._ros_params.fixed_frame
+                    p_world.header.stamp = now
+                    p_world.point.x = side_points[i, 0].item()
+                    p_world.point.y = side_points[i, 1].item()
+                    p_world.point.z = side_points[i, 2].item()
+
+                    try:
+                        # 2. 转换到相机坐标系
+                        transform = self.tf_buffer.lookup_transform(
+                            camera_frame,
+                            self._ros_params.fixed_frame,
+                            rospy.Time(0) # 使用 Time(0) 获取最新 TF，避免时间戳不同步问题
+                        )
+                        p_cam = do_transform_point(p_world, transform)
+
+                        # 3. 投影到像素平面
+                        if p_cam.point.z > 0.1: # 确保在相机前方
+                            u = int((fx * p_cam.point.x / p_cam.point.z) + cx)
+                            v = int((fy * p_cam.point.y / p_cam.point.z) + cy)
+
+                            # 4. 绘制
+                            if 0 <= u < debug_image.shape[1] and 0 <= v < debug_image.shape[0]:
+                                color_bgr = (int(b * 255), int(g * 255), int(r * 255))
+                                cv2.circle(debug_image, (u, v), 5, color_bgr, -1) # 实心点
+                                cv2.circle(debug_image, (u, v), 6, (255, 255, 255), 1) # 白色边框
+                                
+                    except Exception as e:
+                        # TF 查找失败是常见情况，可以忽略或打印警告
+                        pass
+
+
+
             # Untraversable plane
             if node.is_untraversable:
                 untraversable_plane = node.get_untraversable_plane(grid_size=2)
@@ -971,6 +1055,14 @@ class WvnLearning:
         self._pub_graph_footprints.publish(footprints_marker)
         self._pub_debug_supervision_graph.publish(supervision_graph_msg)
 
+        # 足尖图像的发布
+        if debug_image is not None:
+            try:
+                self._pub_footstep_image.publish(self._bridge.cv2_to_imgmsg(debug_image, "bgr8"))
+                # rospy.loginfo_throttle(1.0, "[Debug Vis] Successfully published footstep image!")
+            except Exception as e:
+                rospy.logerr(f"[Debug Vis] Failed to publish image: {e}")
+        
         # Publish latest traversability
         self._pub_instant_traversability.publish(self._supervision_generator.traversability)
         self._system_events["visualize_supervision"] = {

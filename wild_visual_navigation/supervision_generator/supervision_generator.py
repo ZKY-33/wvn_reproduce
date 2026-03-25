@@ -26,6 +26,8 @@ class SupervisionGenerator:
         time_horizon,
         graph_max_length,
         friction_predict,
+        min_friction,
+        max_friction
     ):
         """Generates traversability signals/labels from different sources
 
@@ -62,7 +64,8 @@ class SupervisionGenerator:
         self._sigmoid_cutoff = sigmoid_cutoff
 
         # friction
-        self._friction_predict = friction_predict
+        self.min_friction = min_friction
+        self.max_friction = max_friction
 
         # Save param to classify untraversable cases
         self._untraversable_thr = untraversable_thr
@@ -114,22 +117,40 @@ class SupervisionGenerator:
         else:
             friction_tensor = friction_override.to(self.device)
 
+        # print(f"DEBUG Update -> Friction: {friction_override:.2f}, Cutoff: {self._sigmoid_cutoff}, Slope: {self._sigmoid_slope}")
+    
         # S = self.get_velocity_selection_matrix(velocities).to(self.device)
 
-        # Compute discrepancy
+        # Compute discrepancy  经过MSE计算, error [0, 1]且一般远小于1, 所以设置cutoff=0.25, slop=20
         # error = (torch.nn.functional.mse_loss(S @ current_velocity, S @ desired_velocity)) / max_velocity
 
         # Filtering stage
         # with torch.no_grad():
-        #     self._state, self._cov = self._kalman_filter_(self._state, self._cov, error)
+            # self._state, self._cov = self._kalman_filter_(self._state, self._cov, error)
         # error = self._state
 
         # Note: The way we use the sigmoid is a bit hacky
         # We use negative argument to revert sigmoid (smaller errors -> 1.0) and stretch the errors
         # self._traversability = torch.sigmoid(-(self._sigmoid_slope * (error - self._sigmoid_cutoff)))
 
+        # 对friction做KF滤波
+        with torch.no_grad():
+            # 用当前的状态 self._state 预测下一步，然后用观测值 current_friction_tensor 更新状态。
+            # 直接传入观测值更新
+            self._state, self._cov = self._kalman_filter_(
+                self._state, 
+                self._cov, 
+                friction_tensor.unsqueeze(0) # 确保维度匹配 [1, 1] 或 [1]
+            )
+            
+        # 使用滤波后的状态作为最终用于计算的摩擦系数
+        friction_filtered = self._state.squeeze() # 去掉多余维度
+
+        # friction normalization [0, 1]
+        friction_norm = (friction_filtered - self.min_friction) / (self.max_friction - self.min_friction)
+        friction_norm = torch.clamp(friction_norm, 0.0, 1.0)
         # use friction_predict value
-        self._traversability = torch.sigmoid(self._sigmoid_slope * (friction_tensor - self._sigmoid_cutoff))
+        self._traversability = torch.sigmoid(self._sigmoid_slope * (friction_norm - self._sigmoid_cutoff))
 
         self._traversability_var = torch.tensor([1.0]).to(
             self._traversability.device
@@ -141,6 +162,8 @@ class SupervisionGenerator:
 
         # Return
         self._traversability = torch.clamp(self._traversability, min=0.001, max=1.0)
+        # print(f"DEBUG Update -> traversability: {self._traversability:.2f}")
+
         return self._traversability, self._traversability_var, self._is_untraversable
 
     def update_pose_prediction(
