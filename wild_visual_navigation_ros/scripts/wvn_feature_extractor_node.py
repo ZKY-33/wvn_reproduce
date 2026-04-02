@@ -491,7 +491,7 @@ class WvnFeatureExtractor:
         # 计数器
         if self._ros_params.verbose:
             self._log_data[f"nr_images_{cam}"] += 1 
-            self._log_data[f"time_last_image_{cam}"] = rospy.get_time() # 修复时间戳显示问题
+            self._log_data[f"time_last_image_{cam}"] = rospy.get_time() 
             rospy.loginfo(f"[{self._node_name}] SAM2 Sync callback: {cam} -> Process")
         
         self._last_image_ts[cam] = ts
@@ -533,7 +533,6 @@ class WvnFeatureExtractor:
             mask_tensor = torch.nn.functional.interpolate(mask_tensor, size=(H, W), mode='nearest').long()
 
             # 5. 特征提取
-            # 此时 external_seg 的格式与 SLIC 输出完全一致
             _, feat, seg, center, dense_feat = self._feature_extractor.extract(
                 img=torch_image[None],
                 external_seg=mask_tensor,
@@ -542,16 +541,14 @@ class WvnFeatureExtractor:
                 n_random_pixels=100,
             )
 
-            # 6. 预测与发布 (与原逻辑完全一致)
+            # 6. 预测与发布, 与原逻辑完全一致
             if self._ros_params.prediction_per_pixel:
                 data = Data(x=dense_feat[0].permute(1, 2, 0).reshape(-1, dense_feat.shape[1]))
             else:
                 input_feat = feat[seg.reshape(-1)]
                 data = Data(x=input_feat)
 
-            prediction = self._model.forward(data)
-
-            # Predict traversability per feature
+            # Predict traversability per segment
             prediction = self._model.forward(data)
 
             if not self.anomaly_detection:
@@ -572,7 +569,7 @@ class WvnFeatureExtractor:
             msg.header = rgb_msg.header
             self._camera_handler[cam]["info_pub"].publish(msg)
 
-            # Publish image
+            # Publish image （经过ImageProjector.resize后、FeatureExtractor.extract前的 224x224 RGB）
             if self._ros_params.camera_topics[cam]["publish_input_image"]:
                 msg = rc.numpy_to_ros_image(
                     (torch_image.permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8),
@@ -628,6 +625,9 @@ class WvnFeatureExtractor:
     def depth_callback(self, depth_msg: Image, cam: str):
         if "last_sync_stamp" not in self._camera_handler[cam]:
             return
+    
+        # DEBUG：尺寸检查
+        # rospy.loginfo(f"[Depth] depth_msg size [H, W]: [{depth_msg.height}, {depth_msg.width}]")
 
         try:
             # 1. 手动进行图像转换，绕过 rc.ros_image_to_torch 的类型限制
@@ -640,21 +640,21 @@ class WvnFeatureExtractor:
             cv_image_float = cv_image.astype(np.float32)
             
             # C. 归一化 (原始值是 0-65535，除以 65535.0 变为 0.0-1.0)
-            # 这样后续的 resize 操作才是合理的
             if cv_image_float.max() > 1.0:
                 cv_image_float = cv_image_float / 65535.0
             
-            # D. 手动转换为 Tensor (H, W) -> (1, H, W)
-            # 注意：此时数值已经是 0.0-1.0 的 float32，不需要再用 ToTensor 做除法了
+            # D. 手动转换为 Tensor (H, W) -> (1, H, W), 此时数值已经是 0.0-1.0 的 float32
             torch_depth = torch.from_numpy(cv_image_float).unsqueeze(0).to(self._ros_params.device)
             
-            # 2. Resize (299x224 -> 224x224)
-            # 假设 resize_image 接受 (C, H, W) 格式的 tensor
+            # 2. Resize (224x299 -> 224x224), 和RGB一样经过 ImageProjector的尺寸压缩
             cropped_depth = self._camera_handler[cam]["depth_projector"].resize_image(torch_depth)
             
             # 3. 反归一化并转回 CPU numpy
             # 恢复到 0-65535 范围
             depth_np = (cropped_depth * 65535.0).squeeze(0).cpu().numpy().astype(np.uint16)
+
+            # DEBUG：尺寸检查
+            # rospy.loginfo(f"[Depth] final depth_np shape: {depth_np.shape}")
             
             # 4. 转 ROS Msg
             msg = self.bridge.cv2_to_imgmsg(depth_np, "16UC1")
