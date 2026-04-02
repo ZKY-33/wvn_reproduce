@@ -17,5 +17,5 @@ camera_topics:
     scheduler_weight: 1
   
 
-network_input_image_height: 224 # 448
-network_input_image_width: 224 # 448
+# network_input_image_height: 224 # 448
+# network_input_image_width: 224 # 448

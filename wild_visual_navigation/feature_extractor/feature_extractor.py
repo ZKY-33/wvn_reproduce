@@ -12,6 +12,7 @@ from wild_visual_navigation.feature_extractor import (
 import torch
 import numpy as np
 import kornia
+import rospy
 from kornia.feature import DenseSIFTDescriptor
 from kornia.contrib import extract_tensor_patches, combine_tensor_patches
 
@@ -20,8 +21,8 @@ class FeatureExtractor:
     def __init__(
         self,
         device: str,
-        segmentation_type: str = "slic",  # slic，sam2
-        feature_type: str = "dino",
+        segmentation_type: str = "slic",  
+        feature_type: str = "dino",    
         input_size: int = 448,
         **kwargs,
     ):
@@ -30,6 +31,7 @@ class FeatureExtractor:
         Args:
             device (str): Compute device
             extractor (str): Extractor model: stego, dino_slic
+            default.yaml: Traversability estimation parameters
         """
 
         self._device = device
@@ -132,6 +134,9 @@ class FeatureExtractor:
     #     return edges, feat, seg, center, None
 
     def extract(self, img, **kwargs):
+        # DEBUG：img input shape check
+        # print(f"[Input img] shape: {img.shape}")
+
         # 1. 检查外部分割 Mask (SAM2 模式)
         external_seg = kwargs.get("external_seg", None)
         
@@ -170,9 +175,11 @@ class FeatureExtractor:
 
         # 2. 统一进行特征提取
         dense_feat = self.compute_features(img, seg, center, **kwargs)
+        # print(f"[Dense feat] shape: {dense_feat.shape}")
 
         # 3. 特征稀疏化 (Sparsify)
         feat = self.sparsify_features(dense_feat, seg)
+        # print(f"[Sparse feat] shape: {feat.shape}")
 
         if kwargs.get("return_dense_features", False):
             return edges, feat, seg, center, dense_feat
@@ -479,6 +486,14 @@ class FeatureExtractor:
                 return torch.stack(sparse_features, dim=1).T
 
             else:
+                # DEBUG：维度以及异常值打印检查
+                # print(f"[Sparsify] Input dense_features shape: {dense_features.shape}")
+                # print(f"[Sparsify] Input seg shape: {seg.shape}, Max ID: {seg.max().item()}, Min ID: {seg.min().item()}")
+                # if torch.isnan(dense_features).any() or torch.isinf(dense_features).any():
+                #     print(f"[Sparsify] WARNING: Input dense_features ALREADY contains NaN/Inf before processing!")
+                # else:
+                #     print(f"[Sparsify] Input dense_features is clean (No NaN/Inf).")
+
                 if cumsum_trick:
                     # Cumsum is slightly slower for 100 segments
                     # Trick: sort the featuers according to the segments and then use cumsum for summing
@@ -499,13 +514,72 @@ class FeatureExtractor:
                     elements_sumed[1:] = elements_sumed[1:] - elements_sumed[:-1]
                     x /= elements_sumed[:, None]
                     return x
+                # else:
+                #     sparse_features = []
+                #     for i in range(seg.max() + 1):
+                #         m = seg == i
+                #         x, y = torch.where(m)
+                #         feat = dense_features[0, :, x, y].mean(dim=1)
+                #         sparse_features.append(feat)
+                #     return torch.stack(sparse_features, dim=1).T
                 else:
                     sparse_features = []
-                    for i in range(seg.max() + 1):
-                        m = seg == i
+                    # --- 新增：记录 max_id 用于调试 ---
+                    max_id = seg.max().item()
+                    
+                    for i in range(max_id + 1):
+                        m = seg == i                     
+                        num_pixels = m.sum().item()
+                        
+                        # --- 检查 1：空区域 ---
+                        if num_pixels == 0:
+                            # 如果区域为空（常见于 Resize 后的小 ID 丢失）
+                            # 必须填充一个默认值，否则 stack 会崩，或者 mean 会 nan
+                            # 这里用全 0 向量填充
+                            dummy_feat = torch.zeros(dense_features.shape[1], device=dense_features.device)
+                            sparse_features.append(dummy_feat)
+                            rospy.logwarn(f"Feature Extractor: ID {i} is empty (0 pixels). Filled with zeros.")
+                            continue
+
                         x, y = torch.where(m)
-                        feat = dense_features[0, :, x, y].mean(dim=1)
+                        # 提取特征
+                        raw_feats = dense_features[0, :, x, y]
+                        
+                        # --- 检查 2：提取出的特征是否包含 NaN (DINO 输出异常) ---
+                        if torch.isnan(raw_feats).any() or torch.isinf(raw_feats).any():
+                            rospy.logerr(f"Extractor Alert: DINO output contains NaN/Inf at ID {i}! Area: {num_pixels}")
+                            # 补救措施：用 0 填充，防止污染整个 batch
+                            feat = torch.zeros_like(raw_feats[0])
+                        else:
+                            # 计算均值
+                            feat = raw_feats.mean(dim=1)
+                            
+                            # --- 检查 3：计算结果是否为 NaN (数值下溢/溢出) ---
+                            if torch.isnan(feat).any() or torch.isinf(feat).any():
+                                rospy.logerr(f"Extractor Alert: Aggregated feature is NaN/Inf! ID {i}, Area: {num_pixels}")
+                                # 补救措施
+                                feat = torch.zeros_like(feat)
+
                         sparse_features.append(feat)
-                    return torch.stack(sparse_features, dim=1).T
+                    
+                    # --- 检查 4：最终堆叠结果 ---
+                    result = torch.stack(sparse_features, dim=1).T
+                    # print(f"[Sparsify] Final result shape: {result.shape}")
+
+                    # DEBUG：异常值检测及打印
+                    # has_nan = torch.isnan(result).any().item()
+                    # has_inf = torch.isinf(result).any().item()                   
+                    # if has_nan or has_inf:
+                    #     print(f"[Sparsify] CRITICAL: Final result contains NaN: {has_nan}, Inf: {has_inf}")
+                    #     # 可选：打印出哪些行(ID)包含了 NaN，方便精准定位
+                    #     nan_rows = torch.isnan(result).any(dim=1)
+                    #     inf_rows = torch.isinf(result).any(dim=1)
+                    #     faulty_ids = torch.where(nan_rows | inf_rows)[0]
+                    #     print(f"[Sparsify] Faulty Instance IDs are: {faulty_ids.tolist()}")
+                    # else:
+                    #     print(f"[Sparsify] Final result is perfectly clean (No NaN/Inf).")
+                    
+                    return result
+
         else:
             return dense_features

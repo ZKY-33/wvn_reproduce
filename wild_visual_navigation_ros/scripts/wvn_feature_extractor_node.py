@@ -180,7 +180,7 @@ class WvnFeatureExtractor:
                 self._camera_handler[cam]["image_projector"] = image_projector
 
             # depth input 
-            input_depth_h = 229
+            input_depth_h = 299
             input_depth_w = 224
             # int to Tensor
             depth_h_tensor = torch.tensor(input_depth_h).to(self._ros_params.device)
@@ -188,7 +188,7 @@ class WvnFeatureExtractor:
 
             #  depth_projector
             self._camera_handler[cam]["depth_projector"] = ImageProjector(
-                K=K, # 使用原始内参
+                K=K, 
                 h=depth_h_tensor,
                 w=depth_w_tensor,
                 new_h=self._ros_params.network_input_image_height, # 224 与RGB保持一致
@@ -227,7 +227,7 @@ class WvnFeatureExtractor:
                 segmentation_mode = "slic"
                 rospy.loginfo(f"[{self._node_name}] SLIC mode (default) for cam '{cam}'. Subscribing to raw image.")
                 
-                self._camera_handler[cam]["segmentation_mode"] = "slic"
+                self._camera_handler[cam]["segmentation_mode"] = segmentation_mode
                 
                 # 原有的订阅逻辑
                 if is_compressed:

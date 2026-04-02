@@ -17,9 +17,9 @@ robot_height: 0.3
 traversability_radius: 3.0          # Maximum distance in meters of the supervision graph
 image_graph_dist_thr: 0.2           # Minimum distance between mission nodes being added
 supervision_graph_dist_thr: 0.1     # Minimum distance between supervision nodes being added
-network_input_image_height: 224     # Unput image height
+network_input_image_height: 224     # Input image height
 network_input_image_width: 224      # Input image width
-segmentation_type: "stego"          # Options: slic, grid, random, stego
+segmentation_type: "stego"          # Options: slic, grid, random, stego  TODO: 合并sam2分支
 feature_type: "stego"               # Options: dino, dinov2, stego
 dino_patch_size: 8                  # Options: 8, 16; We found 8 is sufficient and faster
 dino_backbone: vit_small            # Options: vit_small

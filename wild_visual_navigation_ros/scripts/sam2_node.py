@@ -21,6 +21,7 @@ from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator, SAM2ImagePredictor
+import torchvision.transforms as T
 
 class SAM2Node:
     def __init__(self):
@@ -29,7 +30,7 @@ class SAM2Node:
         self.bridge = CvBridge()
         # 1. ROS 通信设置, 订阅图像 
         self.sub = rospy.Subscriber("/wide_angle_camera_depth/image_color_rect_resize", Image, self.image_callback, queue_size=1, buff_size=2**24)
-        # 发布分割结果 带mask的Image和可视化的Image
+        # 发布分割结果 mask图和可视化的RGB图
         self.pub = rospy.Publisher("/sam2/segmentation", Image, queue_size=1)
         self.pub_overlay = rospy.Publisher("/sam2/segmentation_overlayed", Image, queue_size=1)
         
@@ -47,22 +48,33 @@ class SAM2Node:
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         sam2_model = build_sam2(cfg_path, ckpt_path, device=device)
-
         self.predictor = SAM2ImagePredictor(sam2_model)
+
+        # 与特征提取的尺寸对齐
+        self._target_h = 224  
+        self._target_w = 224  
+        # 也可以从参数服务器读取 
+        # self._target_h = rospy.get_param("~target_height", 224)
+        # self._target_w = rospy.get_param("~target_width", 224)
+
+        # 手动做尺寸压缩 最近邻插值
+        self.image_crop = T.Compose([
+            T.Resize(self._target_h, T.InterpolationMode.NEAREST), 
+            T.CenterCrop(self._target_h)
+        ])
         
-        # 预先计算网格点 (只在初始化时计算一次)
-        # 假设图像大小是 224x299 (根据你的日志)，我们将图像划分为 14x15 的网格
-        # 你可以根据需要调整密度，越稀疏越快
-        self.grid_h, self.grid_w = 14, 15
-        # 生成网格坐标
-        y_coords = np.linspace(0, 223, self.grid_h) # 0 到 223
-        x_coords = np.linspace(0, 298, self.grid_w) # 0 到 298
+        # 预先计算网格点, 只在初始化时计算一次
+        self.grid_h, self.grid_w = 4, 4
+        # 生成网格坐标, 使用动态的极值, 向内缩进半个网格间距,避免点打在图像绝对边缘
+        margin_y = self._target_h / (2 * self.grid_h)
+        margin_x = self._target_w / (2 * self.grid_w)
+        y_coords = np.linspace(margin_y, self._target_h - margin_y, self.grid_h) 
+        x_coords = np.linspace(margin_x, self._target_w - margin_x, self.grid_w) 
         xx, yy = np.meshgrid(x_coords, y_coords)
-        # 变成 (N, 2) 的数组
-        self.grid_points = np.stack([xx.flatten(), yy.flatten()], axis=1)
+        # 变成 (N, 2) 的数组，注意加上 .astype(np.float32)，SAM2 要求浮点数
+        self.grid_points = np.stack([xx.flatten(), yy.flatten()], axis=1).astype(np.float32)
 
-        rospy.loginfo("SAM2 model loaded successfully.")
-
+        # rospy.loginfo("SAM2 model loaded successfully.")
         rospy.loginfo("SAM2 Node Initialized.")
         
 
@@ -77,32 +89,32 @@ class SAM2Node:
             else:
                 cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
 
-            rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            H, W = rgb_image.shape[:2]
+            # a. Numpy (H,W,C, 0-255) -> Torch Tensor (C,H,W, 0.0-1.0)
+            rgb_np = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            torch_image = torch.from_numpy(rgb_np).float() / 255.0
+            torch_image = torch_image.permute(2, 0, 1).unsqueeze(0)  # 变成 [1, 3, H, W]
+            
+            # b. 执行与 WVN ImageProjector 完全相同的 Resize + CenterCrop (NEAREST插值)
+            resized_torch_image = self.image_crop(torch_image)
+            
+            # c. 转回 Numpy 供 SAM2 使用
+            resized_np_image = (resized_torch_image[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            
+            # 压缩后的尺寸
+            H, W = resized_np_image.shape[:2]
 
             # 2. 设置图像 
-            self.predictor.set_image(rgb_image)
+            self.predictor.set_image(resized_np_image)
 
-            # 3. 准备稀疏网格点，均匀采样 16 个点进行独立查询。
-            # 数量越多越慢，16 个点通常能平衡速度与细节。
-            grid_size = 4  # 4x4 网格 = 16 个点
-            x_coords = np.linspace(W//grid_size, W - W//grid_size, grid_size)
-            y_coords = np.linspace(H//grid_size, H - H//grid_size, grid_size)
-            xx, yy = np.meshgrid(x_coords, y_coords)
-            grid_points = np.stack([xx.flatten(), yy.flatten()], axis=1).astype(np.float32)
+            # infer_start = time.time()
 
             # 4. 多区域分割逻辑
-            infer_start = time.time()
-            
-            # 初始化最终的面板，用于存储分割结果
-            # 0 表示背景，不同的整数代表不同的区域 ID
-            final_panel = np.zeros((H, W), dtype=np.uint8)
-            
+            # 初始化最终的面板，用于存储分割结果，0 表示背景，不同的整数代表不同的区域 ID
+            final_panel = np.zeros((H, W), dtype=np.uint8)  # 先全部填充0
             current_region_id = 1 # 区域计数器，从 1 开始
             
-            # 记录已覆盖的区域，用于去重（可选，这里采用简单的叠加策略）
             # 遍历每一个点，独立进行推理
-            for i, point in enumerate(grid_points):
+            for i, point in enumerate(self.grid_points):
                 # 构造单个点的输入 [1, 2]
                 point_input = point.reshape(1, 2)
                 label_input = np.array([1]) # 1: 前景点
@@ -143,16 +155,11 @@ class SAM2Node:
                     final_panel[best_mask_bool] = current_region_id
                     current_region_id += 1
             
+            # DEBUG：用时检查
             # infer_end = time.time()
             # rospy.loginfo(f"[Timer] Inference Time: {(infer_end - infer_start)*1000:.2f} ms | Found Regions: {current_region_id - 1}")
-
-            # 5. 后处理与可视化准备
-            # final_panel 中：0=背景, 1=区域1, 2=区域2 ...
-            # 为了给 DINOv2 使用，我们可以直接发布 final_panel (mono8)
-            # 为了可视化，我们需要将其放大以便看清颜色差异
             
-            # --- 发布原始 ID 图 (给 DINOv2) ---
-            # DINOv2 可以根据 ID 提取对应区域的特征
+            # --- 发布原始 ID 图 (for 特征提取) ---
             mask_msg = self.bridge.cv2_to_imgmsg(final_panel, encoding="mono8")
             mask_msg.header = msg.header
             self.pub.publish(mask_msg)
@@ -173,15 +180,21 @@ class SAM2Node:
             
             # 转回 BGR
             color_mask = cv2.cvtColor(hsv_panel, cv2.COLOR_HSV2BGR)
+            base_bgr_image = cv2.cvtColor(resized_np_image, cv2.COLOR_RGB2BGR)
+            overlay_image = cv2.addWeighted(base_bgr_image, 0.6, color_mask, 0.4, 0)
             
             # 叠加到原图 (透明度 0.5)
-            overlay_image = cv2.addWeighted(cv_image, 0.6, color_mask, 0.4, 0)
+            overlay_image = cv2.addWeighted(resized_np_image, 0.6, color_mask, 0.4, 0)
             
             # 发布可视化
             overlay_msg = self.bridge.cv2_to_imgmsg(overlay_image, encoding="bgr8")
             overlay_msg.header = msg.header
             self.pub_overlay.publish(overlay_msg)
 
+            # DEBUG：尺寸检查打印
+            # rospy.loginfo(f"[SAM2 Publish] segmentation shape (H, W): {final_panel.shape}, RGB shape (H, W): {overlay_image.shape}")
+            
+            # 用时打印
             end_total = time.time()
             rospy.loginfo(f"===> [Timer] TOTAL CALLBACK TIME: {(end_total - start_total)*1000:.2f} ms <===")
 
