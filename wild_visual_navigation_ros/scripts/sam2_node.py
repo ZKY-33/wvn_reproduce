@@ -130,17 +130,16 @@ class SAM2Node:
                 best_idx = np.argmax(scores)
                 best_mask = masks[best_idx] # (H, W), bool or float
                 
-                # 转换为 bool 类型 (解决之前的报错)
+                # 转换为 bool 类型
                 best_mask_bool = best_mask.astype(bool)
                 
                 # 质量过滤：如果置信度太低，忽略该区域
-                if scores[best_idx] < 0.5:
-                    continue
+                # if scores[best_idx] < 0.5:
+                #     continue
 
                 # --- 区域合并逻辑 ---
                 # 策略：如果该 mask 覆盖的区域大部分是空的（未被标记），则将其标记为新区域。
                 # 如果该区域已经被标记过了，则保留原有的标记（防止同一个小物体被重复标记不同ID）。
-                
                 # 计算该 mask 覆盖了多少“空白区域”
                 overlap_area = np.sum(final_panel[best_mask_bool] == 0)
                 total_area = np.sum(best_mask_bool)
@@ -148,7 +147,7 @@ class SAM2Node:
                 # 只有当该区域有一定比例是新区域时，才进行标记
                 # 这里设置阈值为 50%，防止同一个物体被打成两半
                 if total_area > 0 and (overlap_area / total_area) > 0.5:
-                    # 如果区域 ID 超过 255，归零重置（防止 uint8 溢出，虽然一般不会遇到这么多区域）
+                    # 如果区域 ID 超过 255，归零重置（防止 uint8 溢出，一般不会遇到这么多区域）
                     if current_region_id > 255:
                         current_region_id = 1 
                         
@@ -159,14 +158,32 @@ class SAM2Node:
             # infer_end = time.time()
             # rospy.loginfo(f"[Timer] Inference Time: {(infer_end - infer_start)*1000:.2f} ms | Found Regions: {current_region_id - 1}")
             
-            # --- 发布原始 ID 图 (for 特征提取) ---
+            # ---重映射,将区域ID变成连续的---
+            # 1. 获取所有存在的 ID
+            unique_ids = np.unique(final_panel)
+            
+            # 2. 构建映射表 {旧ID: 新ID}
+            id_map = {old_id: new_id for new_id, old_id in enumerate(unique_ids)}
+            
+            # 3. 创建一个新的 panel 来存储结果
+            continuous_panel = np.zeros_like(final_panel)
+            
+            # 4. 执行映射, 如果区域非常多，这里可以用向量化操作优化，但通常 ID 数量很少，循环即可
+            for old_id, new_id in id_map.items():
+                continuous_panel[final_panel == old_id] = new_id
+            # 替换原来的 panel
+            final_panel = continuous_panel
+            new_unique_ids = np.unique(final_panel)
+            # rospy.loginfo(f"[SAM2] Remapped IDs. Original: {list(unique_ids)} -> Continuous: {list(new_unique_ids)}")
+
+            
+            # --- 发布原始 ID 图 (供特征提取使用) ---
             mask_msg = self.bridge.cv2_to_imgmsg(final_panel, encoding="mono8")
             mask_msg.header = msg.header
             self.pub.publish(mask_msg)
 
             # --- 发布彩色可视化 (给 RViz) ---
-            # 将 ID 映射为不同的颜色
-            # 使用 HSV 颜色空间生成差异明显的颜色
+            # 将 ID 映射为不同的颜色, 使用 HSV 颜色空间生成差异明显的颜色
             hsv_panel = np.zeros((H, W, 3), dtype=np.uint8)
             
             # 背景 (ID 0) 设为黑色
@@ -195,8 +212,8 @@ class SAM2Node:
             # rospy.loginfo(f"[SAM2 Publish] segmentation shape (H, W): {final_panel.shape}, RGB shape (H, W): {overlay_image.shape}")
             
             # 用时打印
-            end_total = time.time()
-            rospy.loginfo(f"===> [Timer] TOTAL CALLBACK TIME: {(end_total - start_total)*1000:.2f} ms <===")
+            # end_total = time.time()
+            # rospy.loginfo(f"===> [SAM2] TOTAL CALLBACK TIME: {(end_total - start_total)*1000:.2f} ms <===")
 
         except Exception as e:
             rospy.logerr(f"Error in callback: {e}")

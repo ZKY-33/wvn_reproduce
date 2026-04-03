@@ -492,7 +492,7 @@ class WvnFeatureExtractor:
         if self._ros_params.verbose:
             self._log_data[f"nr_images_{cam}"] += 1 
             self._log_data[f"time_last_image_{cam}"] = rospy.get_time() 
-            rospy.loginfo(f"[{self._node_name}] SAM2 Sync callback: {cam} -> Process")
+            # rospy.loginfo(f"[{self._node_name}] SAM2 Sync callback: {cam} -> Process")
         
         self._last_image_ts[cam] = ts
         self._camera_handler[cam]["last_sync_stamp"] = rgb_msg.header.stamp
