@@ -405,7 +405,7 @@ class WvnLearning:
         self._pub_graph_footprints = rospy.Publisher(
             "/wild_visual_navigation_node/graph_footprints", Marker, queue_size=10
         )
-        # 新增：足尖可视化图像
+        # DBEUG：足尖映射可视化图像
         self._pub_footstep_image = rospy.Publisher(
             "/wild_visual_navigation_node/footstep_image", 
             Image, 
@@ -682,8 +682,8 @@ class WvnLearning:
             "value": "message received",
         }
 
-        if self._ros_params.verbose:
-            print(f"[{self._node_name}] Image callback: {camera_options['name']}... ", end="")
+        # if self._ros_params.verbose:
+        #     print(f"[{self._node_name}] Image callback: {camera_options['name']}... ", end="")
 
         try:
             # Run the callback so as to match the desired rate
@@ -732,14 +732,14 @@ class WvnLearning:
                 }
                 return
 
-            # Prepare image projector
+            # Prepare image projector, nfo_msg: 224x299
             K, H, W = rc.ros_cam_info_to_tensors(info_msg, device=self._ros_params.device)
             image_projector = ImageProjector(
                 K=K,
                 h=H,
                 w=W,
-                new_h=self._ros_params.network_input_image_height,
-                new_w=self._ros_params.network_input_image_width,
+                new_h=self._ros_params.network_input_image_height,      # 224
+                new_w=self._ros_params.network_input_image_width,       # 224
             )
             # Add image to base node
             # convert image message to torch image
@@ -925,18 +925,28 @@ class WvnLearning:
                             from cv_bridge import CvBridge
                             self._bridge = CvBridge()
                             
-                        debug_image = self._bridge.imgmsg_to_cv2(handler['last_image'], "bgr8").copy()
+                        debug_image = self._bridge.imgmsg_to_cv2(handler['last_image'], "bgr8").copy()  
+                        # print(f"debug_image H x W: {debug_image.shape[0], debug_image.shape[1]}")       # 224 x 224尺寸
                         
-                        # 提取相机内参
+                        # 提取相机内参 
+                        # print(f"camera_info H x W: {handler['last_info'].width, handler['last_info'].height}")  # 224 x 224 尺寸
                         K = handler['last_info'].K
-                        fx, fy = K[0], K[4]
-                        cx, cy = K[2], K[5]
+                        fx, fy = K[0], K[4] 
+                        cx, cy = K[2], K[5]  
                         camera_frame = handler['last_info'].header.frame_id
                         break # 只处理第一个找到的相机
                     except Exception as e:
                         rospy.logwarn(f"[{self._node_name}] Failed to prepare debug image: {e}")
                         debug_image = None
 
+
+        # DEBUG:时间戳检查
+        if not hasattr(self, '_last_vis_print_time'):
+            self._last_vis_print_time = 0
+        
+        if not hasattr(self, '_last_vis_node_time'):
+            self._last_vis_node_time = None
+        current_vis_node_time = None 
 
         last_points = [None, None]
         for node in self._traversability_estimator.get_supervision_nodes():
@@ -997,6 +1007,8 @@ class WvnLearning:
                     footprints_marker.points.append(p)
                     footprints_marker.colors.append(c)
 
+            current_vis_node_time = node.timestamp
+
             # 新增：将足尖投影到图像 
             if debug_image is not None and camera_frame is not None:
                 for i in range(2):
@@ -1010,11 +1022,18 @@ class WvnLearning:
 
                     try:
                         # 2. 转换到相机坐标系
-                        transform = self.tf_buffer.lookup_transform(
-                            camera_frame,
-                            self._ros_params.fixed_frame,
-                            rospy.Time(0) # 使用 Time(0) 获取最新 TF，避免时间戳不同步问题
-                        )
+                        try:
+                            transform = self.tf_buffer.lookup_transform(
+                                camera_frame,
+                                self._ros_params.fixed_frame,
+                                handler['last_image'].header.stamp, # 使用图像的时间戳
+                                timeout=rospy.Duration(0.01)
+                            )
+                        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                            # 如果 TF 还没有推送到那个时刻，或者已经过期
+                            rospy.logwarn_throttle(1.0, f"TF lookup failed for image time: {e}")
+                            continue
+
                         p_cam = do_transform_point(p_world, transform)
 
                         # 3. 投影到像素平面
@@ -1054,6 +1073,62 @@ class WvnLearning:
             return
         self._pub_graph_footprints.publish(footprints_marker)
         self._pub_debug_supervision_graph.publish(supervision_graph_msg)
+
+        # --- DEBUG: RGB图像与Footprint 时间戳对齐检查---
+        # 1. 定义打印频率，每 1.0 秒打印一次，避免刷屏)
+        current_rostime = rospy.Time.now()
+        should_print = False
+        if isinstance(current_rostime, rospy.Time):     # 防止 time 为 0
+            if (current_rostime.to_sec() - self._last_vis_print_time) > 1.0:
+                should_print = True
+                self._last_vis_print_time = current_rostime.to_sec()
+
+        # 2. 检查 RGB 图像时间戳
+        rgb_msg_time = None
+        if debug_image is not None and camera_frame is not None:
+            # 回溯 handler 获取时间戳
+            if hasattr(self, '_camera_handler'):
+                for cam_name, handler in self._camera_handler.items():
+                    if 'last_image' in handler:
+                        rgb_msg_time = handler['last_image'].header.stamp.to_sec()
+                        break
+
+        # 3. 打印对齐信息
+        if should_print:
+            print("\n" + "="*10 + " [Time Sync Check] " + "="*10)
+            
+            # A. 打印 RGB 图像时间
+            if rgb_msg_time is not None:
+                print(f"[RGB  Image] Timestamp: {rgb_msg_time:.4f} s")
+            else:
+                print("[RGB  Image] No image data found.")
+
+            # B. 打印 Footprint (Node) 时间
+            if current_vis_node_time is not None:
+                print(f"[Footprint]  Timestamp: {current_vis_node_time:.4f} s")
+            else:
+                print("[Footprint]  No node data found.")
+
+            # C. 计算并打印时间差
+            if rgb_msg_time is not None and current_vis_node_time is not None:
+                diff = current_vis_node_time - rgb_msg_time
+                print(f"[Diff]       Footprint - RGB = {diff:.4f} s ({diff*1000:.1f} ms)")
+                if abs(diff) > 0.1:
+                    print("WARNING: Large timestamp discrepancy detected!")     # 间隔太大警告
+            else:
+                print("[Diff]       Cannot calculate difference.")
+
+        # 4. 计算可视化帧率
+        if should_print:
+            if self._last_vis_node_time is not None and current_vis_node_time is not None:
+                dt = current_vis_node_time - self._last_vis_node_time
+                if dt > 0:
+                    fps = 1.0 / dt
+                    print(f"[Vis Framerate] Approx {fps:.1f} Hz (Based on SupervisionNode timestamps)")
+            
+            # 更新上一次的时间
+            self._last_vis_node_time = current_vis_node_time
+
 
         # 足尖图像的发布
         if debug_image is not None:

@@ -11,8 +11,7 @@ notebooks/**
 *.code-workspace
 **.bag
 *.ckpt
-ros_demo.md
-rosbag.md
+操作说明.md
 mission/*
 
 # DrawIO
