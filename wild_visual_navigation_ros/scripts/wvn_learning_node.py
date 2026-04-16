@@ -534,11 +534,43 @@ class WvnLearning:
         """
         if not self._setup_ready:
             return
-
+        
         self._system_events["robot_state_callback_received"] = {
             "time": time_func(),
             "value": "message received",
         }
+
+        # DEBUG：时间戳检查打印
+        T_state = state_msg.header.stamp
+        T_image = None
+        T_info = None
+        T_feat = None
+        
+        # 尝试获取 image、info 和 last_imagefeat 的时间戳 
+        if hasattr(self, '_camera_handler'):
+            for cam_name, handler in self._camera_handler.items():
+                if 'last_image' in handler and handler['last_image'] is not None:
+                    T_image = handler['last_image'].header.stamp
+                if 'last_info' in handler and handler['last_info'] is not None:
+                    T_info = handler['last_info'].header.stamp
+                if 'last_imagefeat' in handler and handler['last_imagefeat'] is not None:
+                    T_feat = handler['last_imagefeat'].header.stamp
+                    break
+
+        current_time = rospy.Time.now().to_sec()
+        if not hasattr(self, '_last_ts_print_time'):
+            self._last_ts_print_time = 0.0
+        if current_time - self._last_ts_print_time > 1.0:   # 控制打印频率
+            self._last_ts_print_time = current_time
+            state_sec = f"{T_state.to_sec():12.4f}"
+            image_sec   = f"{T_image.to_sec():12.4f}" if T_image is not None else "         None"
+            info_sec  = f"{T_info.to_sec():12.4f}" if T_info is not None else "         None"
+            imagefeat_sec   = f"{T_feat.to_sec():12.4f}" if T_feat is not None else "         None"
+            diff_ms = f"{(T_state - T_image).to_sec() * 1000:+8.1f} ms" if image_sec is not None else "       N/A"
+            sys_time = f"{current_time:12.4f}"
+            
+            print(f"[SYNC] Wall:{sys_time}s | State:{state_sec}s | Info:{info_sec}s | Image:{image_sec}s | Feat:{imagefeat_sec}s | Diff:{diff_ms}")
+
         try:
             ts = state_msg.header.stamp.to_sec()
             if abs(ts - self._last_supervision_ts) < 1.0 / self._ros_params.supervision_callback_rate:
@@ -549,7 +581,7 @@ class WvnLearning:
                 return
             self._last_supervision_ts = ts
 
-            # Query transforms from TF
+            # Query transforms from TF 基于robotstate timestamp查询tf
             success, pose_base_in_world = rc.ros_tf_to_torch(
                 self.query_tf(
                     self._ros_params.fixed_frame,
@@ -581,7 +613,7 @@ class WvnLearning:
                 return
 
             # The footprint requires a correction: we use the same orientation as the base
-            # 显式克隆避免原地修改报错
+            # 显式克隆避免原地修改报错 左上3x3旋转矩阵强制置单位阵 垂直于base的矩阵阴影
             corrected_pose_footprint = pose_footprint_in_base.clone()
             corrected_pose_footprint[:3, :3] = torch.eye(3, device=self._ros_params.device)
 
@@ -606,7 +638,7 @@ class WvnLearning:
 
             # Create supervision node for the graph
             supervision_node = SupervisionNode(
-                timestamp=ts,
+                timestamp=ts,  # state_msg
                 pose_base_in_world=pose_base_in_world,
                 pose_footprint_in_base=corrected_pose_footprint,
                 twist_in_base=current_twist_tensor,
@@ -615,7 +647,7 @@ class WvnLearning:
                 length=self._ros_params.robot_length,
                 height=self._ros_params.robot_height,
                 supervision=supervision_tensor,
-                traversability=traversability,
+                traversability=traversability,          # 用真实friction值计算得到的评分
                 traversability_var=traversability_var,
                 is_untraversable=is_untraversable,
             )
@@ -670,11 +702,13 @@ class WvnLearning:
         cam_name = camera_options['name']
 
         # 新增：缓存相机信息和图像用于可视化 
-        # 将相机内参和原始图像存入 handler，供 visualize_supervision 使用
+        # 将info、image、feat存入 handler，供 visualize_supervision 使用
         if cam_name in self._camera_handler:
             self._camera_handler[cam_name]['last_info'] = info_msg
             if self._ros_params.mode == WVNMode.DEBUG:
                 self._camera_handler[cam_name]['last_image'] = image_msg
+                self._camera_handler[cam_name]['last_imagefeat'] = imagefeat_msg
+
 
 
         self._system_events["image_callback_received"] = {
@@ -913,6 +947,7 @@ class WvnLearning:
         # 新增：足尖可视化到图像里
         debug_image = None
         camera_frame = None
+        current_vis_node_time = None 
         
         # 寻找第一个可用的相机数据进行可视化 (通常只有一个相机)
         if hasattr(self, '_camera_handler'):
@@ -939,14 +974,6 @@ class WvnLearning:
                         rospy.logwarn(f"[{self._node_name}] Failed to prepare debug image: {e}")
                         debug_image = None
 
-
-        # DEBUG:时间戳检查
-        if not hasattr(self, '_last_vis_print_time'):
-            self._last_vis_print_time = 0
-        
-        if not hasattr(self, '_last_vis_node_time'):
-            self._last_vis_node_time = None
-        current_vis_node_time = None 
 
         last_points = [None, None]
         for node in self._traversability_estimator.get_supervision_nodes():
@@ -1009,47 +1036,47 @@ class WvnLearning:
 
             current_vis_node_time = node.timestamp
 
-            # 新增：将足尖投影到图像 
-            if debug_image is not None and camera_frame is not None:
-                for i in range(2):
-                    # 1. 构建 World 坐标系下的点
-                    p_world = PointStamped()
-                    p_world.header.frame_id = self._ros_params.fixed_frame
-                    p_world.header.stamp = now
-                    p_world.point.x = side_points[i, 0].item()
-                    p_world.point.y = side_points[i, 1].item()
-                    p_world.point.z = side_points[i, 2].item()
+            # # 新增：将足尖投影到图像 
+            # if debug_image is not None and camera_frame is not None:
+            #     for i in range(2):
+            #         # 1. 构建 World 坐标系下的点
+            #         p_world = PointStamped()
+            #         p_world.header.frame_id = self._ros_params.fixed_frame
+            #         p_world.header.stamp = now
+            #         p_world.point.x = side_points[i, 0].item()
+            #         p_world.point.y = side_points[i, 1].item()
+            #         p_world.point.z = side_points[i, 2].item()
 
-                    try:
-                        # 2. 转换到相机坐标系
-                        try:
-                            transform = self.tf_buffer.lookup_transform(
-                                camera_frame,
-                                self._ros_params.fixed_frame,
-                                handler['last_image'].header.stamp, # 使用图像的时间戳
-                                timeout=rospy.Duration(0.01)
-                            )
-                        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-                            # 如果 TF 还没有推送到那个时刻，或者已经过期
-                            rospy.logwarn_throttle(1.0, f"TF lookup failed for image time: {e}")
-                            continue
+            #         try:
+            #             # 2. 转换到相机坐标系
+            #             try:
+            #                 transform = self.tf_buffer.lookup_transform(
+            #                     camera_frame,
+            #                     self._ros_params.fixed_frame,
+            #                     handler['last_image'].header.stamp, # 使用图像的时间戳
+            #                     timeout=rospy.Duration(0.01)
+            #                 )
+            #             except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+            #                 # 如果 TF 还没有推送到那个时刻，或者已经过期
+            #                 rospy.logwarn_throttle(1.0, f"TF lookup failed for image time: {e}")
+            #                 continue
 
-                        p_cam = do_transform_point(p_world, transform)
+            #             p_cam = do_transform_point(p_world, transform)
 
-                        # 3. 投影到像素平面
-                        if p_cam.point.z > 0.1: # 确保在相机前方
-                            u = int((fx * p_cam.point.x / p_cam.point.z) + cx)
-                            v = int((fy * p_cam.point.y / p_cam.point.z) + cy)
+            #             # 3. 投影到像素平面
+            #             if p_cam.point.z > 0.1: # 确保在相机前方
+            #                 u = int((fx * p_cam.point.x / p_cam.point.z) + cx)
+            #                 v = int((fy * p_cam.point.y / p_cam.point.z) + cy)
 
-                            # 4. 绘制
-                            if 0 <= u < debug_image.shape[1] and 0 <= v < debug_image.shape[0]:
-                                color_bgr = (int(b * 255), int(g * 255), int(r * 255))
-                                cv2.circle(debug_image, (u, v), 5, color_bgr, -1) # 实心点
-                                cv2.circle(debug_image, (u, v), 6, (255, 255, 255), 1) # 白色边框
+            #                 # 4. 绘制
+            #                 if 0 <= u < debug_image.shape[1] and 0 <= v < debug_image.shape[0]:
+            #                     color_bgr = (int(b * 255), int(g * 255), int(r * 255))
+            #                     cv2.circle(debug_image, (u, v), 5, color_bgr, -1) # 实心点
+            #                     cv2.circle(debug_image, (u, v), 6, (255, 255, 255), 1) # 白色边框
                                 
-                    except Exception as e:
-                        # TF 查找失败是常见情况，可以忽略或打印警告
-                        pass
+            #         except Exception as e:
+            #             # TF 查找失败是常见情况，可以忽略或打印警告
+            #             pass
 
 
 
@@ -1074,76 +1101,22 @@ class WvnLearning:
         self._pub_graph_footprints.publish(footprints_marker)
         self._pub_debug_supervision_graph.publish(supervision_graph_msg)
 
-        # --- DEBUG: RGB图像与Footprint 时间戳对齐检查---
-        # 1. 定义打印频率，每 1.0 秒打印一次，避免刷屏)
-        current_rostime = rospy.Time.now()
-        should_print = False
-        if isinstance(current_rostime, rospy.Time):     # 防止 time 为 0
-            if (current_rostime.to_sec() - self._last_vis_print_time) > 1.0:
-                should_print = True
-                self._last_vis_print_time = current_rostime.to_sec()
-
-        # 2. 检查 RGB 图像时间戳
-        rgb_msg_time = None
-        if debug_image is not None and camera_frame is not None:
-            # 回溯 handler 获取时间戳
-            if hasattr(self, '_camera_handler'):
-                for cam_name, handler in self._camera_handler.items():
-                    if 'last_image' in handler:
-                        rgb_msg_time = handler['last_image'].header.stamp.to_sec()
-                        break
-
-        # 3. 打印对齐信息
-        if should_print:
-            print("\n" + "="*10 + " [Time Sync Check] " + "="*10)
-            
-            # A. 打印 RGB 图像时间
-            if rgb_msg_time is not None:
-                print(f"[RGB  Image] Timestamp: {rgb_msg_time:.4f} s")
-            else:
-                print("[RGB  Image] No image data found.")
-
-            # B. 打印 Footprint (Node) 时间
-            if current_vis_node_time is not None:
-                print(f"[Footprint]  Timestamp: {current_vis_node_time:.4f} s")
-            else:
-                print("[Footprint]  No node data found.")
-
-            # C. 计算并打印时间差
-            if rgb_msg_time is not None and current_vis_node_time is not None:
-                diff = current_vis_node_time - rgb_msg_time
-                print(f"[Diff]       Footprint - RGB = {diff:.4f} s ({diff*1000:.1f} ms)")
-                if abs(diff) > 0.1:
-                    print("WARNING: Large timestamp discrepancy detected!")     # 间隔太大警告
-            else:
-                print("[Diff]       Cannot calculate difference.")
-
-        # 4. 计算可视化帧率
-        if should_print:
-            if self._last_vis_node_time is not None and current_vis_node_time is not None:
-                dt = current_vis_node_time - self._last_vis_node_time
-                if dt > 0:
-                    fps = 1.0 / dt
-                    print(f"[Vis Framerate] Approx {fps:.1f} Hz (Based on SupervisionNode timestamps)")
-            
-            # 更新上一次的时间
-            self._last_vis_node_time = current_vis_node_time
-
-
-        # 足尖图像的发布
-        if debug_image is not None:
-            try:
-                self._pub_footstep_image.publish(self._bridge.cv2_to_imgmsg(debug_image, "bgr8"))
-                # rospy.loginfo_throttle(1.0, "[Debug Vis] Successfully published footstep image!")
-            except Exception as e:
-                rospy.logerr(f"[Debug Vis] Failed to publish image: {e}")
-        
         # Publish latest traversability
         self._pub_instant_traversability.publish(self._supervision_generator.traversability)
         self._system_events["visualize_supervision"] = {
             "time": time_func(),
             "value": f"executed successfully",
         }
+        
+        # # 足尖图像的发布
+        # if debug_image is not None:
+        #     try:
+        #         self._pub_footstep_image.publish(self._bridge.cv2_to_imgmsg(debug_image, "bgr8"))
+        #         # rospy.loginfo_throttle(1.0, "[Debug Vis] Successfully published footstep image!")
+        #     except Exception as e:
+        #         rospy.logerr(f"[Debug Vis] Failed to publish image: {e}")
+        
+        
 
     @accumulate_time
     def visualize_mission_graph(self):
