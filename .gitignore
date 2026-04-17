@@ -9,10 +9,14 @@ assets/stego/cocostuff27_vit_base_5.ckpt
 .vscode/**
 notebooks/**
 *.code-workspace
-**.bag
+
+# model checkpoint
 *.ckpt
+
 操作说明.md
-mission/*
+
+# rosbag
+mission/*.bag
 
 # DrawIO
 **.dtmp

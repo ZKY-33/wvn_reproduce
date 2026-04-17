@@ -24,6 +24,7 @@ class ExperimentParams:
         store_model_every_n_steps_key: Optional[str] = None
         log_to_disk: bool = True
         model_path: Optional[str] = None
+        load_pretrained_checkpoint: Optional[str] = None  # 新增：预训练推理模型的加载路径
         log_confidence: bool = True
         use_threshold: bool = True
 

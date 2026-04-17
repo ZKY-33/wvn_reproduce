@@ -38,14 +38,12 @@ class SAM2Node:
         cfg_path = rospy.get_param("~sam2_model_cfg", "configs/sam2.1/sam2.1_hiera_t.yaml")
         ckpt_path = rospy.get_param("~sam2_checkpoint", "/root/catkin_ws/src/wild_visual_navigation/sam2/checkpoints/sam2.1_hiera_tiny.pt")
         
-        # 3. 模型加载
-        rospy.loginfo(f"Loading SAM2 from: {cfg_path}")
-        rospy.loginfo(f"Checkpoint: {ckpt_path}")
-        
+        # 3. SAM2模型加载
+        # rospy.loginfo(f"Loading SAM2 from: {cfg_path}")
+        # rospy.loginfo(f"Checkpoint: {ckpt_path}")
         if not os.path.exists(ckpt_path):
             rospy.logerr(f"Checkpoint file not found at {ckpt_path}! Please download it.")
             return
-
         device = "cuda" if torch.cuda.is_available() else "cpu"
         sam2_model = build_sam2(cfg_path, ckpt_path, device=device)
         self.predictor = SAM2ImagePredictor(sam2_model)

@@ -17,6 +17,8 @@
   <!-- Launch node -->
   <node name="wvn_learning_node" pkg="wild_visual_navigation_ros" type="wvn_learning_node.py" output="screen">
     <param name="reload_default_params" value="False" />
+    <!-- 预训练推理模型加载路径 -->
+    <param name="load_pretrained_checkpoint" value="/root/catkin_ws/src/wild_visual_navigation/results/2026-04-17T06-20-51_test/last_checkpoint.pt" />
   </node>
 
   <node name="wvn_feature_extractor_node" pkg="wild_visual_navigation_ros" type="wvn_feature_extractor_node.py" output="screen">

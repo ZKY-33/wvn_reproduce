@@ -67,6 +67,11 @@ class WvnLearning:
         # Read params
         self.read_params()
 
+        # 新增：load checkpoint path 
+        self._pretrained_ckpt_path = self._params.general.load_pretrained_checkpoint
+        if self._pretrained_ckpt_path is None:
+            self._pretrained_ckpt_path = ""
+
         # Initialize camera handler for subscription/publishing
         self._system_events = {}
 
@@ -77,12 +82,11 @@ class WvnLearning:
         self._color_palette = sns.color_palette(self._ros_params.colormap, as_cmap=True)
         self._bridge = CvBridge()
 
-        # Setup Mission Folder
+        # Setup Mission Folder  创建新的文件夹保存新训的模型
         model_path = create_experiment_folder(self._params)
 
         with read_write(self._params):
             self._params.general.model_path = model_path
-
 
         # Initialize traversability estimator
         self._traversability_estimator = TraversabilityEstimator(
@@ -165,6 +169,15 @@ class WvnLearning:
             ),
         )
 
+        # 新增：加载已有模型而非冷启动
+        # load checkpoint path from yaml
+        if self._pretrained_ckpt_path and os.path.exists(self._pretrained_ckpt_path):
+            self._traversability_estimator.load_checkpoint(self._pretrained_ckpt_path)
+            rospy.loginfo(f"Pretrained checkpoint [{self._pretrained_ckpt_path}] loaded successfully.")   
+        else:
+            rospy.loginfo("Checkpoint path is empty. Use empty model to train.")   
+
+
         # Register shutdown callbacks
         rospy.on_shutdown(self.shutdown_callback)
         signal.signal(signal.SIGINT, self.shutdown_callback)
@@ -244,6 +257,8 @@ class WvnLearning:
             self._params.general.log_confidence = self._ros_params.log_confidence
             self._params.loss.confidence_std_factor = self._ros_params.confidence_std_factor
             self._params.loss.w_temp = 0
+            # 新增：model path 
+            self._params.general.load_pretrained_checkpoint = rospy.get_param("~load_pretrained_checkpoint", "")
 
         # Parse operation modes
         if self._ros_params.mode == WVNMode.ONLINE:
@@ -566,7 +581,7 @@ class WvnLearning:
             image_sec   = f"{T_image.to_sec():12.4f}" if T_image is not None else "         None"
             info_sec  = f"{T_info.to_sec():12.4f}" if T_info is not None else "         None"
             imagefeat_sec   = f"{T_feat.to_sec():12.4f}" if T_feat is not None else "         None"
-            diff_ms = f"{(T_state - T_image).to_sec() * 1000:+8.1f} ms" if image_sec is not None else "       N/A"
+            diff_ms = f"{(T_state - T_image).to_sec() * 1000:+8.1f} ms" if T_image is not None else "       N/A"
             sys_time = f"{current_time:12.4f}"
             
             print(f"[SYNC] Wall:{sys_time}s | State:{state_sec}s | Info:{info_sec}s | Image:{image_sec}s | Feat:{imagefeat_sec}s | Diff:{diff_ms}")
