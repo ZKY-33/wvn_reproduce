@@ -82,12 +82,6 @@ class WvnLearning:
         self._color_palette = sns.color_palette(self._ros_params.colormap, as_cmap=True)
         self._bridge = CvBridge()
 
-        # Setup Mission Folder  创建新的文件夹保存新训的模型
-        model_path = create_experiment_folder(self._params)
-
-        with read_write(self._params):
-            self._params.general.model_path = model_path
-
         # Initialize traversability estimator
         self._traversability_estimator = TraversabilityEstimator(
             params=self._params,
@@ -103,7 +97,13 @@ class WvnLearning:
         )
 
         # control flag of model training or not
-        self._traversability_estimator.pause_learning = False
+        self._traversability_estimator.pause_learning = True
+
+        if not self._traversability_estimator.pause_learning:
+            # Setup Mission Folder  创建新的文件夹保存新训的模型
+            model_path = create_experiment_folder(self._params)
+            with read_write(self._params):
+                self._params.general.model_path = model_path
 
         self._friction_predict = 2.0  # 先做声明避免报错
         # Initialize traversability generator to process velocity commands
